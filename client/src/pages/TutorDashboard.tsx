@@ -1,0 +1,536 @@
+import Navigation from "@/components/Navigation";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { trpc } from "@/lib/trpc";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Link, useLocation } from "wouter";
+import { BookOpen, Calendar, MessageSquare, DollarSign, Users, Plus, Edit, Clock, FileText } from "lucide-react";
+import { AvailabilityManager } from "@/components/AvailabilityManager";
+import { TimeBlockManager } from "@/components/TimeBlockManager";
+import { VideoUploadManager } from "@/components/VideoUploadManager";
+import { useEffect, useState } from "react";
+import { getLoginUrl } from "@/const";
+import { toast } from "sonner";
+
+export default function TutorDashboard() {
+  const { user, isAuthenticated, loading } = useAuth();
+  const [, setLocation] = useLocation();
+  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
+
+  const { data: tutorProfile } = trpc.tutorProfile.getMy.useQuery(
+    undefined,
+    { enabled: isAuthenticated && user?.role === "tutor" }
+  );
+
+  const { data: courses, isLoading: coursesLoading, refetch: refetchCourses } = trpc.course.myCoursesAsTutor.useQuery(
+    undefined,
+    { enabled: isAuthenticated && user?.role === "tutor" }
+  );
+
+  const { data: subscriptions, isLoading: subsLoading } = trpc.subscription.mySubscriptionsAsTutor.useQuery(
+    undefined,
+    { enabled: isAuthenticated && user?.role === "tutor" }
+  );
+
+  const { data: upcomingSessions } = trpc.session.myUpcoming.useQuery(
+    undefined,
+    { enabled: isAuthenticated && user?.role === "tutor" }
+  );
+
+  const { data: earnings } = trpc.payment.myEarnings.useQuery(
+    undefined,
+    { enabled: isAuthenticated && user?.role === "tutor" }
+  );
+
+  const createCourseMutation = trpc.course.create.useMutation();
+  const createProfileMutation = trpc.tutorProfile.create.useMutation();
+
+  useEffect(() => {
+    if (!loading && !isAuthenticated) {
+      window.location.href = getLoginUrl();
+    }
+    if (!loading && user?.role !== "tutor" && user?.role !== "admin") {
+      setLocation("/"); // Redirect to home if not a tutor
+    }
+  }, [loading, isAuthenticated, user, setLocation]);
+
+  const [courseForm, setCourseForm] = useState({
+    title: "",
+    description: "",
+    subject: "",
+    gradeLevel: "",
+    price: "",
+    duration: "",
+    sessionsPerWeek: "",
+    totalSessions: "",
+  });
+
+  const handleCreateCourse = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    try {
+      await createCourseMutation.mutateAsync({
+        title: courseForm.title,
+        description: courseForm.description,
+        subject: courseForm.subject,
+        gradeLevel: courseForm.gradeLevel,
+        price: courseForm.price,
+        duration: parseInt(courseForm.duration) || undefined,
+        sessionsPerWeek: parseInt(courseForm.sessionsPerWeek) || undefined,
+        totalSessions: parseInt(courseForm.totalSessions) || undefined,
+      });
+
+      toast.success("Course created successfully!");
+      setIsCreateDialogOpen(false);
+      setCourseForm({
+        title: "",
+        description: "",
+        subject: "",
+        gradeLevel: "",
+        price: "",
+        duration: "",
+        sessionsPerWeek: "",
+        totalSessions: "",
+      });
+      refetchCourses();
+    } catch (error) {
+      toast.error("Failed to create course");
+    }
+  };
+
+  if (loading || !isAuthenticated) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-pulse text-muted-foreground">Loading...</div>
+      </div>
+    );
+  }
+
+  const activeSubscriptions = subscriptions?.filter(s => s.subscription.status === "active") || [];
+  const activeCourses = courses?.filter(c => c.isActive) || [];
+
+  return (
+    <div className="min-h-screen flex flex-col bg-background">
+      <Navigation />
+
+      <div className="flex-1">
+        {/* Header */}
+        <div className="bg-gradient-to-br from-primary/5 via-accent/5 to-background border-b border-border">
+          <div className="container py-8">
+            <h1 className="text-3xl font-bold mb-2">Tutor Dashboard</h1>
+            <p className="text-muted-foreground">Manage your courses, students, and earnings</p>
+          </div>
+        </div>
+
+        <div className="container py-8">
+          {/* Check if tutor profile exists */}
+          {!tutorProfile ? (
+            <Card className="mb-8">
+              <CardContent className="py-12 text-center">
+                <h3 className="text-xl font-semibold mb-2">Complete Your Tutor Profile</h3>
+                <p className="text-muted-foreground mb-6">
+                  Create your profile to start offering courses
+                </p>
+                <Button onClick={() => {
+                  // Create basic profile
+                  createProfileMutation.mutate({
+                    subjects: JSON.stringify([]),
+                    gradeLevels: JSON.stringify([]),
+                    hourlyRate: "0",
+                  });
+                  toast.success("Profile created! Please update your details.");
+                }}>
+                  Create Profile
+                </Button>
+              </CardContent>
+            </Card>
+          ) : (
+            <>
+              {/* Overview Cards */}
+              <div className="grid md:grid-cols-4 gap-6 mb-8">
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardDescription>Active Courses</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                        <BookOpen className="w-5 h-5 text-primary" />
+                      </div>
+                      <span className="text-3xl font-bold">{activeCourses.length}</span>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardDescription>Active Students</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-accent/10 flex items-center justify-center">
+                        <Users className="w-5 h-5 text-accent" />
+                      </div>
+                      <span className="text-3xl font-bold">{activeSubscriptions.length}</span>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardDescription>Upcoming Sessions</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-success/10 flex items-center justify-center">
+                        <Calendar className="w-5 h-5 text-success" />
+                      </div>
+                      <span className="text-3xl font-bold">{upcomingSessions?.length || 0}</span>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardDescription>Total Earnings</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                        <DollarSign className="w-5 h-5 text-primary" />
+                      </div>
+                      <span className="text-3xl font-bold">${earnings?.completed.toFixed(0) || 0}</span>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/session-notes")}>
+                  <CardHeader className="pb-3">
+                    <CardDescription>Session Notes</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-purple-100 flex items-center justify-center">
+                        <FileText className="w-5 h-5 text-purple-600" />
+                      </div>
+                      <span className="text-sm font-medium text-muted-foreground">View All Notes</span>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Main Content */}
+              <Tabs defaultValue="courses" className="space-y-6">
+                <TabsList className="grid w-full max-w-2xl grid-cols-5">
+                  <TabsTrigger value="profile">Profile</TabsTrigger>
+                  <TabsTrigger value="courses">Courses</TabsTrigger>
+                  <TabsTrigger value="students">Students</TabsTrigger>
+                  <TabsTrigger value="sessions">Sessions</TabsTrigger>
+                  <TabsTrigger value="availability">Availability</TabsTrigger>
+                </TabsList>
+
+                {/* Profile Tab */}
+                <TabsContent value="profile" className="space-y-6">
+                  <h2 className="text-2xl font-bold">Profile Settings</h2>
+                  <VideoUploadManager 
+                    currentVideoUrl={(tutorProfile as any)?.introVideoUrl}
+                  />
+                </TabsContent>
+
+                {/* Courses Tab */}
+                <TabsContent value="courses" className="space-y-6">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-2xl font-bold">My Courses</h2>
+                    <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
+                      <DialogTrigger asChild>
+                        <Button className="gap-2">
+                          <Plus className="w-4 h-4" />
+                          Create Course
+                        </Button>
+                      </DialogTrigger>
+                      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                        <DialogHeader>
+                          <DialogTitle>Create New Course</DialogTitle>
+                          <DialogDescription>
+                            Add a new tutoring course or package to your offerings
+                          </DialogDescription>
+                        </DialogHeader>
+                        <form onSubmit={handleCreateCourse} className="space-y-4">
+                          <div>
+                            <Label htmlFor="title">Course Title *</Label>
+                            <Input
+                              id="title"
+                              value={courseForm.title}
+                              onChange={(e) => setCourseForm({ ...courseForm, title: e.target.value })}
+                              required
+                            />
+                          </div>
+                          <div>
+                            <Label htmlFor="description">Description</Label>
+                            <Textarea
+                              id="description"
+                              value={courseForm.description}
+                              onChange={(e) => setCourseForm({ ...courseForm, description: e.target.value })}
+                              rows={4}
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <Label htmlFor="subject">Subject *</Label>
+                              <Input
+                                id="subject"
+                                value={courseForm.subject}
+                                onChange={(e) => setCourseForm({ ...courseForm, subject: e.target.value })}
+                                required
+                              />
+                            </div>
+                            <div>
+                              <Label htmlFor="gradeLevel">Grade Level</Label>
+                              <Input
+                                id="gradeLevel"
+                                value={courseForm.gradeLevel}
+                                onChange={(e) => setCourseForm({ ...courseForm, gradeLevel: e.target.value })}
+                              />
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <Label htmlFor="price">Price ($) *</Label>
+                              <Input
+                                id="price"
+                                type="number"
+                                step="0.01"
+                                value={courseForm.price}
+                                onChange={(e) => setCourseForm({ ...courseForm, price: e.target.value })}
+                                required
+                              />
+                            </div>
+                            <div>
+                              <Label htmlFor="duration">Session Duration (min)</Label>
+                              <Input
+                                id="duration"
+                                type="number"
+                                value={courseForm.duration}
+                                onChange={(e) => setCourseForm({ ...courseForm, duration: e.target.value })}
+                              />
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <Label htmlFor="sessionsPerWeek">Sessions Per Week</Label>
+                              <Input
+                                id="sessionsPerWeek"
+                                type="number"
+                                value={courseForm.sessionsPerWeek}
+                                onChange={(e) => setCourseForm({ ...courseForm, sessionsPerWeek: e.target.value })}
+                              />
+                            </div>
+                            <div>
+                              <Label htmlFor="totalSessions">Total Sessions</Label>
+                              <Input
+                                id="totalSessions"
+                                type="number"
+                                value={courseForm.totalSessions}
+                                onChange={(e) => setCourseForm({ ...courseForm, totalSessions: e.target.value })}
+                              />
+                            </div>
+                          </div>
+                          <div className="flex justify-end gap-3 pt-4">
+                            <Button type="button" variant="outline" onClick={() => setIsCreateDialogOpen(false)}>
+                              Cancel
+                            </Button>
+                            <Button type="submit" disabled={createCourseMutation.isPending}>
+                              {createCourseMutation.isPending ? "Creating..." : "Create Course"}
+                            </Button>
+                          </div>
+                        </form>
+                      </DialogContent>
+                    </Dialog>
+                  </div>
+
+                  {coursesLoading ? (
+                    <div className="space-y-4">
+                      {[1, 2].map(i => <Skeleton key={i} className="h-48 w-full" />)}
+                    </div>
+                  ) : courses && courses.length > 0 ? (
+                    <div className="grid md:grid-cols-2 gap-6">
+                      {courses.map((course) => (
+                        <Card key={course.id} className="hover:shadow-elegant transition-all">
+                          <CardHeader>
+                            <div className="flex items-start justify-between">
+                              <div className="flex-1">
+                                <CardTitle className="text-lg mb-2">{course.title}</CardTitle>
+                                <CardDescription className="line-clamp-2">{course.description}</CardDescription>
+                              </div>
+                              <Badge variant={course.isActive ? "default" : "secondary"}>
+                                {course.isActive ? "Active" : "Inactive"}
+                              </Badge>
+                            </div>
+                          </CardHeader>
+                          <CardContent className="space-y-4">
+                            <div className="flex gap-2">
+                              <Badge variant="secondary">{course.subject}</Badge>
+                              {course.gradeLevel && <Badge variant="outline">{course.gradeLevel}</Badge>}
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4 text-sm">
+                              <div>
+                                <p className="text-muted-foreground">Price</p>
+                                <p className="font-semibold text-lg">${parseFloat(course.price)}</p>
+                              </div>
+                              {course.duration && (
+                                <div>
+                                  <p className="text-muted-foreground">Duration</p>
+                                  <p className="font-medium">{course.duration} min</p>
+                                </div>
+                              )}
+                            </div>
+
+                            <Button asChild variant="outline" size="sm" className="w-full">
+                              <Link href={`/course/${course.id}`}>
+                                View Course
+                              </Link>
+                            </Button>
+                          </CardContent>
+                        </Card>
+                      ))}
+                    </div>
+                  ) : (
+                    <Card>
+                      <CardContent className="py-16 text-center">
+                        <BookOpen className="w-16 h-16 mx-auto mb-4 text-muted-foreground" />
+                        <h3 className="text-xl font-semibold mb-2">No Courses Yet</h3>
+                        <p className="text-muted-foreground mb-6">
+                          Create your first course to start teaching
+                        </p>
+                        <Button onClick={() => setIsCreateDialogOpen(true)} className="gap-2">
+                          <Plus className="w-4 h-4" />
+                          Create Course
+                        </Button>
+                      </CardContent>
+                    </Card>
+                  )}
+                </TabsContent>
+
+                {/* Students Tab */}
+                <TabsContent value="students" className="space-y-6">
+                  <h2 className="text-2xl font-bold">My Students</h2>
+
+                  {subsLoading ? (
+                    <div className="space-y-4">
+                      {[1, 2].map(i => <Skeleton key={i} className="h-32 w-full" />)}
+                    </div>
+                  ) : subscriptions && subscriptions.length > 0 ? (
+                    <div className="space-y-4">
+                      {subscriptions.map(({ subscription, course, parent }) => (
+                        <Card key={subscription.id}>
+                          <CardContent className="pt-6">
+                            <div className="flex items-center justify-between">
+                              <div className="flex-1">
+                                <p className="font-semibold">{parent.name || "Parent"}</p>
+                                <p className="text-sm text-muted-foreground">{course.title}</p>
+                                <p className="text-xs text-muted-foreground mt-1">
+                                  {subscription.sessionsCompleted || 0} sessions completed
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-3">
+                                <Badge variant={subscription.status === "active" ? "default" : "secondary"}>
+                                  {subscription.status}
+                                </Badge>
+                                <Button asChild variant="outline" size="sm">
+                                  <Link href="/messages" className="flex items-center gap-2">
+                                      <MessageSquare className="w-4 h-4" />
+                                      Message
+                                  </Link>
+                                </Button>
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      ))}
+                    </div>
+                  ) : (
+                    <Card>
+                      <CardContent className="py-16 text-center">
+                        <Users className="w-16 h-16 mx-auto mb-4 text-muted-foreground" />
+                        <h3 className="text-xl font-semibold mb-2">No Students Yet</h3>
+                        <p className="text-muted-foreground">
+                          Students who enroll in your courses will appear here
+                        </p>
+                      </CardContent>
+                    </Card>
+                  )}
+                </TabsContent>
+
+                {/* Sessions Tab */}
+                <TabsContent value="sessions" className="space-y-6">
+                  <h2 className="text-2xl font-bold">Upcoming Sessions</h2>
+
+                  {upcomingSessions && upcomingSessions.length > 0 ? (
+                    <div className="space-y-4">
+                      {upcomingSessions.map((session) => (
+                        <Card key={session.id}>
+                          <CardContent className="pt-6">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-4">
+                                <div className="w-12 h-12 rounded-lg bg-primary/10 flex items-center justify-center">
+                                  <Calendar className="w-6 h-6 text-primary" />
+                                </div>
+                                <div>
+                                  <p className="font-semibold">
+                                    {new Date(session.scheduledAt).toLocaleDateString()}
+                                  </p>
+                                  <p className="text-sm text-muted-foreground">
+                                    {new Date(session.scheduledAt).toLocaleTimeString()} • {session.duration} minutes
+                                  </p>
+                                </div>
+                              </div>
+                              <Badge>{session.status}</Badge>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      ))}
+                    </div>
+                  ) : (
+                    <Card>
+                      <CardContent className="py-16 text-center">
+                        <Calendar className="w-16 h-16 mx-auto mb-4 text-muted-foreground" />
+                        <h3 className="text-xl font-semibold mb-2">No Upcoming Sessions</h3>
+                        <p className="text-muted-foreground">
+                          Your scheduled sessions will appear here
+                        </p>
+                      </CardContent>
+                    </Card>
+                  )}
+                </TabsContent>
+
+                {/* Availability Tab */}
+                <TabsContent value="availability" className="space-y-6">
+                  <div className="flex items-center gap-2 mb-6">
+                    <Clock className="h-6 w-6" />
+                    <h2 className="text-2xl font-bold">Manage Availability</h2>
+                  </div>
+                  <p className="text-muted-foreground mb-6">
+                    Set your regular weekly schedule and block out time for vacations or appointments.
+                    Parents will only be able to book sessions during your available hours.
+                  </p>
+                  <div className="space-y-6">
+                    <AvailabilityManager />
+                    <TimeBlockManager />
+                  </div>
+                </TabsContent>
+              </Tabs>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

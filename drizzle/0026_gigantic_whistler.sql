@@ -1,0 +1,2 @@
+ALTER TABLE `subscriptions` ADD `preferredTutorId` int;--> statement-breakpoint
+ALTER TABLE `subscriptions` ADD CONSTRAINT `subscriptions_preferredTutorId_users_id_fk` FOREIGN KEY (`preferredTutorId`) REFERENCES `users`(`id`) ON DELETE set null ON UPDATE no action;

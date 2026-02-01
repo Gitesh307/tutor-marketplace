@@ -1,0 +1,195 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1767207135457,
+      "tag": "0000_confused_stryfe",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1767207339381,
+      "tag": "0001_lumpy_jubilee",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1767554743661,
+      "tag": "0002_mighty_mandarin",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1768098948759,
+      "tag": "0003_dazzling_leper_queen",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1768430878415,
+      "tag": "0004_windy_rick_jones",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1768491333897,
+      "tag": "0005_careful_stick",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1768512224893,
+      "tag": "0006_condemned_kronos",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1768624183649,
+      "tag": "0007_slow_union_jack",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "5",
+      "when": 1768624900255,
+      "tag": "0008_flowery_norrin_radd",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "5",
+      "when": 1768628502914,
+      "tag": "0009_public_lester",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "5",
+      "when": 1768746106663,
+      "tag": "0010_skinny_johnny_storm",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "5",
+      "when": 1768750320953,
+      "tag": "0011_fluffy_carlie_cooper",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "5",
+      "when": 1768751483184,
+      "tag": "0012_freezing_goliath",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "5",
+      "when": 1768753585865,
+      "tag": "0013_glamorous_titanium_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "5",
+      "when": 1768754377309,
+      "tag": "0014_polite_retro_girl",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "5",
+      "when": 1768757876044,
+      "tag": "0015_colorful_kinsey_walden",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "5",
+      "when": 1768758553335,
+      "tag": "0016_easy_bloodaxe",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "5",
+      "when": 1768759088593,
+      "tag": "0017_windy_iron_patriot",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "5",
+      "when": 1768766099395,
+      "tag": "0018_concerned_silver_fox",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "5",
+      "when": 1768768648847,
+      "tag": "0019_sticky_hairball",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "5",
+      "when": 1768769404364,
+      "tag": "0020_worthless_king_cobra",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "5",
+      "when": 1768769879187,
+      "tag": "0021_spotty_killmonger",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "5",
+      "when": 1768770216161,
+      "tag": "0022_light_grim_reaper",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "5",
+      "when": 1768772262406,
+      "tag": "0023_overjoyed_vertigo",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "5",
+      "when": 1768785862039,
+      "tag": "0024_married_emma_frost",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "5",
+      "when": 1768943016683,
+      "tag": "0025_abnormal_puma",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "5",
+      "when": 1769295381844,
+      "tag": "0026_gigantic_whistler",
+      "breakpoints": true
+    }
+  ]
+}

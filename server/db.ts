@@ -1,0 +1,2956 @@
+import { eq, and, or, like, desc, asc, sql, gte, lte, lt, gt, inArray } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/mysql2";
+import { 
+  InsertUser, users, tutorProfiles, parentProfiles, courses, 
+  subscriptions, sessions, conversations, messages, payments,
+  InsertTutorProfile, InsertParentProfile, InsertCourse,
+  InsertSubscription, InsertSession, InsertConversation,
+  InsertMessage, InsertPayment, courseTutors,
+  platformStats, featuredCourses, testimonials, faqs, blogPosts,
+  tutorAvailability, InsertTutorAvailability,
+  tutorTimeBlocks, InsertTutorTimeBlock,
+  acuityMappingTemplates, InsertAcuityMappingTemplate,
+  emailSettings, InsertEmailSettings,
+  sessionNotes, InsertSessionNote,
+  sessionNoteAttachments, InsertSessionNoteAttachment,
+  tutorReviews, InsertTutorReview,
+  notificationPreferences, InsertNotificationPreference,
+  notificationLogs, InsertNotificationLog,
+  inAppNotifications, InsertInAppNotification
+} from "../drizzle/schema";
+import { ENV } from './_core/env';
+
+let _db: ReturnType<typeof drizzle> | null = null;
+
+export async function getDb() {
+  if (!_db && process.env.DATABASE_URL) {
+    try {
+      _db = drizzle(process.env.DATABASE_URL);
+    } catch (error) {
+      console.warn("[Database] Failed to connect:", error);
+      _db = null;
+    }
+  }
+  return _db;
+}
+
+// ============ User Management ============
+
+export async function upsertUser(user: InsertUser): Promise<void> {
+  if (!user.openId) {
+    throw new Error("User openId is required for upsert");
+  }
+
+  const db = await getDb();
+  if (!db) {
+    console.warn("[Database] Cannot upsert user: database not available");
+    return;
+  }
+
+  try {
+    const values: InsertUser = {
+      openId: user.openId,
+    };
+    const updateSet: Record<string, unknown> = {};
+
+    const textFields = ["name", "email", "loginMethod"] as const;
+    type TextField = (typeof textFields)[number];
+
+    const assignNullable = (field: TextField) => {
+      const value = user[field];
+      if (value === undefined) return;
+      const normalized = value ?? null;
+      values[field] = normalized;
+      updateSet[field] = normalized;
+    };
+
+    textFields.forEach(assignNullable);
+
+    if (user.lastSignedIn !== undefined) {
+      values.lastSignedIn = user.lastSignedIn;
+      updateSet.lastSignedIn = user.lastSignedIn;
+    }
+    if (user.role !== undefined) {
+      values.role = user.role;
+      updateSet.role = user.role;
+    } else if (user.openId === ENV.ownerOpenId) {
+      values.role = 'admin';
+      updateSet.role = 'admin';
+    } else {
+      values.role = 'parent'; // Default role
+    }
+
+    if (!values.lastSignedIn) {
+      values.lastSignedIn = new Date();
+    }
+
+    if (Object.keys(updateSet).length === 0) {
+      updateSet.lastSignedIn = new Date();
+    }
+
+    await db.insert(users).values(values).onDuplicateKeyUpdate({
+      set: updateSet,
+    });
+  } catch (error) {
+    console.error("[Database] Failed to upsert user:", error);
+    throw error;
+  }
+}
+
+export async function getUserByOpenId(openId: string) {
+  const db = await getDb();
+  if (!db) {
+    console.warn("[Database] Cannot get user: database not available");
+    return undefined;
+  }
+
+  const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
+  return result.length > 0 ? result[0] : undefined;
+}
+
+export async function getUserById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+
+  const result = await db.select().from(users).where(eq(users.id, id)).limit(1);
+  return result.length > 0 ? result[0] : undefined;
+}
+
+export async function getAllUsers() {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db.select().from(users).orderBy(desc(users.createdAt));
+}
+
+export async function updateUserRole(userId: number, role: "parent" | "tutor" | "admin") {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db.update(users).set({ role }).where(eq(users.id, userId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update user role:", error);
+    return false;
+  }
+}
+
+// ============ User Creation ============
+
+export async function createUser(user: { name: string; email: string; role: string }) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(users).values({
+      name: user.name,
+      email: user.email,
+      role: user.role as 'admin' | 'tutor' | 'parent',
+      openId: `temp_${Date.now()}_${Math.random().toString(36).substring(7)}`, // Temporary openId
+    }) as any;
+    return Number(result.insertId);
+  } catch (error) {
+    console.error("[Database] Failed to create user:", error);
+    return null;
+  }
+}
+
+// ============ Tutor Profile Management ============
+
+export async function getAllTutorsWithStatus() {
+  const db = await getDb();
+  if (!db) return [];
+
+  const result = await db
+    .select({
+      id: tutorProfiles.id,
+      userId: tutorProfiles.userId,
+      userName: users.name,
+      email: users.email,
+      bio: tutorProfiles.bio,
+      qualifications: tutorProfiles.qualifications,
+      subjects: tutorProfiles.subjects,
+      gradeLevels: tutorProfiles.gradeLevels,
+      hourlyRate: tutorProfiles.hourlyRate,
+      yearsOfExperience: tutorProfiles.yearsOfExperience,
+      profileImageUrl: tutorProfiles.profileImageUrl,
+      approvalStatus: tutorProfiles.approvalStatus,
+      rejectionReason: tutorProfiles.rejectionReason,
+      createdAt: tutorProfiles.createdAt,
+    })
+    .from(tutorProfiles)
+    .leftJoin(users, eq(tutorProfiles.userId, users.id));
+
+  return result;
+}
+
+export async function approveTutorProfile(tutorId: number) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    // First, get the tutor profile to find the userId
+    const profile = await db
+      .select()
+      .from(tutorProfiles)
+      .where(eq(tutorProfiles.id, tutorId))
+      .limit(1);
+    
+    if (!profile || profile.length === 0) {
+      console.error("[Database] Tutor profile not found:", tutorId);
+      return false;
+    }
+
+    const userId = profile[0].userId;
+
+    // Update tutor profile approval status
+    await db
+      .update(tutorProfiles)
+      .set({
+        approvalStatus: 'approved',
+        isActive: true,
+      })
+      .where(eq(tutorProfiles.id, tutorId));
+
+    // Change user role from 'parent' to 'tutor'
+    await db
+      .update(users)
+      .set({ role: 'tutor' })
+      .where(eq(users.id, userId));
+
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to approve tutor:", error);
+    return false;
+  }
+}
+
+export async function rejectTutorProfile(tutorId: number, reason: string) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .update(tutorProfiles)
+      .set({
+        approvalStatus: 'rejected',
+        rejectionReason: reason,
+        isActive: false,
+      })
+      .where(eq(tutorProfiles.id, tutorId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to reject tutor:", error);
+    return false;
+  }
+}
+
+// ============ Tutor Profile Management ============
+
+export async function createTutorProfile(profile: InsertTutorProfile) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(tutorProfiles).values(profile) as any;
+    return Number(result.insertId);
+  } catch (error) {
+    console.error("[Database] Failed to create tutor profile:", error);
+    return null;
+  }
+}
+
+export async function getTutorProfileByUserId(userId: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db
+    .select({
+      id: tutorProfiles.id,
+      userId: tutorProfiles.userId,
+      bio: tutorProfiles.bio,
+      qualifications: tutorProfiles.qualifications,
+      subjects: tutorProfiles.subjects,
+      gradeLevels: tutorProfiles.gradeLevels,
+      hourlyRate: tutorProfiles.hourlyRate,
+      yearsOfExperience: tutorProfiles.yearsOfExperience,
+      availability: tutorProfiles.availability,
+      profileImageUrl: tutorProfiles.profileImageUrl,
+      isActive: tutorProfiles.isActive,
+      rating: tutorProfiles.rating,
+      totalReviews: tutorProfiles.totalReviews,
+      approvalStatus: tutorProfiles.approvalStatus,
+      createdAt: tutorProfiles.createdAt,
+      updatedAt: tutorProfiles.updatedAt,
+      name: users.name,
+      email: users.email,
+    })
+    .from(tutorProfiles)
+    .leftJoin(users, eq(tutorProfiles.userId, users.id))
+    .where(eq(tutorProfiles.userId, userId))
+    .limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function getTutorProfileById(profileId: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db
+    .select({
+      id: tutorProfiles.id,
+      userId: tutorProfiles.userId,
+      bio: tutorProfiles.bio,
+      qualifications: tutorProfiles.qualifications,
+      subjects: tutorProfiles.subjects,
+      gradeLevels: tutorProfiles.gradeLevels,
+      hourlyRate: tutorProfiles.hourlyRate,
+      yearsOfExperience: tutorProfiles.yearsOfExperience,
+      availability: tutorProfiles.availability,
+      profileImageUrl: tutorProfiles.profileImageUrl,
+      isActive: tutorProfiles.isActive,
+      rating: tutorProfiles.rating,
+      totalReviews: tutorProfiles.totalReviews,
+      approvalStatus: tutorProfiles.approvalStatus,
+      createdAt: tutorProfiles.createdAt,
+      updatedAt: tutorProfiles.updatedAt,
+      name: users.name,
+      email: users.email,
+    })
+    .from(tutorProfiles)
+    .leftJoin(users, eq(tutorProfiles.userId, users.id))
+    .where(eq(tutorProfiles.id, profileId))
+    .limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function updateTutorProfile(userId: number, updates: Partial<InsertTutorProfile>) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db.update(tutorProfiles).set(updates).where(eq(tutorProfiles.userId, userId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update tutor profile:", error);
+    return false;
+  }
+}
+
+export async function getAllActiveTutors() {
+  const db = await getDb();
+  if (!db) return [];
+
+  const result = await db
+    .select({
+      id: tutorProfiles.id,
+      userId: tutorProfiles.userId,
+      bio: tutorProfiles.bio,
+      qualifications: tutorProfiles.qualifications,
+      subjects: tutorProfiles.subjects,
+      gradeLevels: tutorProfiles.gradeLevels,
+      hourlyRate: tutorProfiles.hourlyRate,
+      yearsOfExperience: tutorProfiles.yearsOfExperience,
+      profileImageUrl: tutorProfiles.profileImageUrl,
+      rating: tutorProfiles.rating,
+      totalReviews: tutorProfiles.totalReviews,
+      userName: users.name,
+      userEmail: users.email,
+    })
+    .from(tutorProfiles)
+    .innerJoin(users, eq(tutorProfiles.userId, users.id))
+    .where(
+      and(
+        eq(tutorProfiles.isActive, true),
+        eq(tutorProfiles.approvalStatus, 'approved')
+      )
+    );
+
+  return result;
+}
+
+// ============ Parent Profile Management ============
+
+export async function createParentProfile(profile: InsertParentProfile) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(parentProfiles).values(profile) as any;
+    return Number(result.insertId);
+  } catch (error) {
+    console.error("[Database] Failed to create parent profile:", error);
+    return null;
+  }
+}
+
+export async function getParentProfileByUserId(userId: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db.select().from(parentProfiles).where(eq(parentProfiles.userId, userId)).limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function updateParentProfile(userId: number, updates: Partial<InsertParentProfile>) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db.update(parentProfiles).set(updates).where(eq(parentProfiles.userId, userId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update parent profile:", error);
+    return false;
+  }
+}
+
+// ============ Course Management ============
+
+export async function createCourse(course: InsertCourse) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(courses).values(course) as any;
+    return Number(result.insertId);
+  } catch (error) {
+    console.error("[Database] Failed to create course:", error);
+    return null;
+  }
+}
+
+export async function getCourseById(id: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db.select().from(courses).where(eq(courses.id, id)).limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+// ============ Course-Tutor Junction Table Management ============
+
+export async function addTutorToCourse(courseId: number, tutorId: number, isPrimary: boolean = false) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db.insert(courseTutors).values({
+      courseId,
+      tutorId,
+      isPrimary,
+    });
+    return true;
+  } catch (error) {
+    console.error("Failed to add tutor to course:", error);
+    return false;
+  }
+}
+
+export async function removeTutorFromCourse(courseId: number, tutorId: number) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db.delete(courseTutors)
+      .where(and(
+        eq(courseTutors.courseId, courseId),
+        eq(courseTutors.tutorId, tutorId)
+      ));
+    return true;
+  } catch (error) {
+    console.error("Failed to remove tutor from course:", error);
+    return false;
+  }
+}
+
+export async function isTutorOfCourse(courseId: number, tutorId: number): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+
+  const result = await db.select()
+    .from(courseTutors)
+    .where(and(
+      eq(courseTutors.courseId, courseId),
+      eq(courseTutors.tutorId, tutorId)
+    ))
+    .limit(1);
+  
+  return result.length > 0;
+}
+
+export async function getTutorsForCourse(courseId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db.select({
+    tutorId: courseTutors.tutorId,
+    isPrimary: courseTutors.isPrimary,
+    user: users,
+    profile: tutorProfiles,
+  })
+    .from(courseTutors)
+    .innerJoin(users, eq(courseTutors.tutorId, users.id))
+    .leftJoin(tutorProfiles, eq(users.id, tutorProfiles.userId))
+    .where(eq(courseTutors.courseId, courseId));
+}
+
+export async function getCoursesByTutorId(tutorId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  // Get course IDs for this tutor from junction table
+  const tutorCourses = await db.select({ courseId: courseTutors.courseId })
+    .from(courseTutors)
+    .where(eq(courseTutors.tutorId, tutorId));
+  
+  if (tutorCourses.length === 0) return [];
+  
+  const courseIds = tutorCourses.map(tc => tc.courseId);
+  return await db.select().from(courses)
+    .where(inArray(courses.id, courseIds))
+    .orderBy(desc(courses.createdAt));
+}
+
+export async function getAllActiveCourses() {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db.select().from(courses).where(eq(courses.isActive, true)).orderBy(desc(courses.createdAt));
+}
+
+export async function updateCourse(id: number, updates: Partial<InsertCourse>) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db.update(courses).set(updates).where(eq(courses.id, id));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update course:", error);
+    return false;
+  }
+}
+
+export async function searchCourses(filters: {
+  subject?: string;
+  gradeLevel?: string;
+  minPrice?: number;
+  maxPrice?: number;
+  searchTerm?: string;
+}) {
+  const db = await getDb();
+  if (!db) return [];
+
+  let conditions = [eq(courses.isActive, true)];
+
+  if (filters.subject) {
+    conditions.push(eq(courses.subject, filters.subject));
+  }
+
+  if (filters.gradeLevel) {
+    conditions.push(eq(courses.gradeLevel, filters.gradeLevel));
+  }
+
+  if (filters.minPrice !== undefined) {
+    conditions.push(gte(courses.price, filters.minPrice.toString()));
+  }
+
+  if (filters.maxPrice !== undefined) {
+    conditions.push(lte(courses.price, filters.maxPrice.toString()));
+  }
+
+  if (filters.searchTerm) {
+    conditions.push(
+      or(
+        like(courses.title, `%${filters.searchTerm}%`),
+        like(courses.description, `%${filters.searchTerm}%`)
+      )!
+    );
+  }
+
+  return await db.select().from(courses).where(and(...conditions)).orderBy(desc(courses.createdAt));
+}
+
+// ============ Subscription Management ============
+
+export async function createSubscription(subscription: InsertSubscription) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(subscriptions).values(subscription) as any;
+    return Number(result.insertId);
+  } catch (error) {
+    console.error("[Database] Failed to create subscription:", error);
+    return null;
+  }
+}
+
+export async function getSubscriptionById(id: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db.select().from(subscriptions).where(eq(subscriptions.id, id)).limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function getSubscriptionsByParentId(parentId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db
+    .select({
+      subscription: subscriptions,
+      course: courses,
+      tutor: users,
+    })
+    .from(subscriptions)
+    .innerJoin(courses, eq(subscriptions.courseId, courses.id))
+    .innerJoin(courseTutors, and(
+      eq(courses.id, courseTutors.courseId),
+      eq(courseTutors.isPrimary, true)
+    ))
+    .innerJoin(users, eq(courseTutors.tutorId, users.id))
+    .where(eq(subscriptions.parentId, parentId))
+    .orderBy(desc(subscriptions.createdAt));
+}
+
+export async function getSubscriptionsByTutorId(tutorId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db
+    .select({
+      subscription: subscriptions,
+      course: courses,
+      parent: users,
+    })
+    .from(subscriptions)
+    .innerJoin(courses, eq(subscriptions.courseId, courses.id))
+    .innerJoin(courseTutors, eq(courses.id, courseTutors.courseId))
+    .innerJoin(users, eq(subscriptions.parentId, users.id))
+    .where(eq(courseTutors.tutorId, tutorId))
+    .orderBy(desc(subscriptions.createdAt));
+}
+
+export async function getAllSubscriptions() {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db
+    .select({
+      subscription: subscriptions,
+      course: courses,
+      parent: users,
+      tutor: { id: users.id, name: users.name, email: users.email },
+    })
+    .from(subscriptions)
+    .leftJoin(courses, eq(subscriptions.courseId, courses.id))
+    .leftJoin(users, eq(subscriptions.parentId, users.id))
+    .orderBy(desc(subscriptions.createdAt));
+}
+
+export async function updateSubscription(id: number, updates: Partial<InsertSubscription>) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db.update(subscriptions).set(updates).where(eq(subscriptions.id, id));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update subscription:", error);
+    return false;
+  }
+}
+
+// ============ Session Management ============
+
+export async function createSession(session: InsertSession) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(sessions).values(session) as any;
+    return Number(result.insertId);
+  } catch (error) {
+    console.error("[Database] Failed to create session:", error);
+    return null;
+  }
+}
+
+export async function getSessionById(id: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db.select().from(sessions).where(eq(sessions.id, id)).limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function getSessionsByParentId(parentId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db.select().from(sessions).where(eq(sessions.parentId, parentId)).orderBy(desc(sessions.scheduledAt));
+}
+
+export async function getSessionsByTutorId(tutorId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db.select().from(sessions).where(eq(sessions.tutorId, tutorId)).orderBy(desc(sessions.scheduledAt));
+}
+
+export async function getUpcomingSessions(userId: number, role: "parent" | "tutor") {
+  const db = await getDb();
+  if (!db) return [];
+
+  const now = Date.now();
+  const condition = role === "parent" 
+    ? eq(sessions.parentId, userId)
+    : eq(sessions.tutorId, userId);
+
+  return await db
+    .select()
+    .from(sessions)
+    .where(and(condition, gte(sessions.scheduledAt, now), eq(sessions.status, "scheduled")))
+    .orderBy(asc(sessions.scheduledAt));
+}
+
+export async function updateSession(id: number, updates: Partial<InsertSession>) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db.update(sessions).set(updates).where(eq(sessions.id, id));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update session:", error);
+    return false;
+  }
+}
+
+// ============ Messaging ============
+
+export async function createConversation(conversation: InsertConversation) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(conversations).values(conversation) as any;
+    return Number(result.insertId);
+  } catch (error) {
+    console.error("[Database] Failed to create conversation:", error);
+    return null;
+  }
+}
+
+export async function getConversationByParticipants(parentId: number, tutorId: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db
+    .select()
+    .from(conversations)
+    .where(and(eq(conversations.parentId, parentId), eq(conversations.tutorId, tutorId)))
+    .limit(1);
+
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function getConversationsByUserId(userId: number, role: "parent" | "tutor") {
+  const db = await getDb();
+  if (!db) return [];
+
+  const condition = role === "parent" 
+    ? eq(conversations.parentId, userId)
+    : eq(conversations.tutorId, userId);
+
+  return await db
+    .select()
+    .from(conversations)
+    .where(condition)
+    .orderBy(desc(conversations.lastMessageAt));
+}
+
+export async function createMessage(message: InsertMessage) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(messages).values(message) as any;
+    
+    // Update conversation's lastMessageAt
+    await db.update(conversations)
+      .set({ lastMessageAt: message.sentAt })
+      .where(eq(conversations.id, message.conversationId));
+
+    return Number(result.insertId);
+  } catch (error) {
+    console.error("[Database] Failed to create message:", error);
+    return null;
+  }
+}
+
+export async function getMessagesByConversationId(conversationId: number, limit: number = 50) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db
+    .select()
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId))
+    .orderBy(desc(messages.sentAt))
+    .limit(limit);
+}
+
+export async function markMessagesAsRead(conversationId: number, userId: number) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .update(messages)
+      .set({ isRead: true })
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          sql`${messages.senderId} != ${userId}`,
+          eq(messages.isRead, false)
+        )
+      );
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to mark messages as read:", error);
+    return false;
+  }
+}
+
+// ============ Payment Management ============
+
+export async function createPayment(payment: InsertPayment) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(payments).values(payment) as any;
+    return Number(result.insertId);
+  } catch (error) {
+    console.error("[Database] Failed to create payment:", error);
+    return null;
+  }
+}
+
+export async function getPaymentById(id: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db.select().from(payments).where(eq(payments.id, id)).limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function getPaymentsByParentId(parentId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db.select().from(payments).where(eq(payments.parentId, parentId)).orderBy(desc(payments.createdAt));
+}
+
+export async function getPaymentsByTutorId(tutorId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db.select().from(payments).where(eq(payments.tutorId, tutorId)).orderBy(desc(payments.createdAt));
+}
+
+export async function getAllPayments() {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db.select().from(payments).orderBy(desc(payments.createdAt));
+}
+
+export async function getTutorEarnings(tutorId: number) {
+  const db = await getDb();
+  if (!db) return { total: 0, completed: 0, pending: 0 };
+
+  const result = await db
+    .select({
+      status: payments.status,
+      total: sql<number>`SUM(${payments.amount})`,
+    })
+    .from(payments)
+    .where(eq(payments.tutorId, tutorId))
+    .groupBy(payments.status);
+
+  let total = 0;
+  let completed = 0;
+  let pending = 0;
+
+  result.forEach(row => {
+    const amount = Number(row.total) || 0;
+    total += amount;
+    if (row.status === "completed") completed += amount;
+    if (row.status === "pending") pending += amount;
+  });
+
+  return { total, completed, pending };
+}
+
+export async function updatePayment(id: number, updates: Partial<InsertPayment>) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db.update(payments).set(updates).where(eq(payments.id, id));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update payment:", error);
+    return false;
+  }
+}
+
+
+// ============ Home Page Data ============
+
+export async function getPlatformStats() {
+  const db = await getDb();
+  if (!db) return [];
+  
+  try {
+    return await db
+      .select()
+      .from(platformStats)
+      .where(eq(platformStats.isActive, true))
+      .orderBy(asc(platformStats.displayOrder));
+  } catch (error) {
+    console.error("[Database] Error fetching platform stats:", error);
+    return [];
+  }
+}
+
+export async function getFeaturedCourses() {
+  const db = await getDb();
+  if (!db) return [];
+  
+  try {
+    return await db
+      .select()
+      .from(featuredCourses)
+      .where(eq(featuredCourses.isActive, true))
+      .orderBy(asc(featuredCourses.displayOrder));
+  } catch (error) {
+    console.error("[Database] Error fetching featured courses:", error);
+    return [];
+  }
+}
+
+export async function getTestimonials() {
+  const db = await getDb();
+  if (!db) return [];
+  
+  try {
+    return await db
+      .select()
+      .from(testimonials)
+      .where(eq(testimonials.isActive, true))
+      .orderBy(asc(testimonials.displayOrder));
+  } catch (error) {
+    console.error("[Database] Error fetching testimonials:", error);
+    return [];
+  }
+}
+
+export async function getFaqs() {
+  const db = await getDb();
+  if (!db) return [];
+  
+  try {
+    return await db
+      .select()
+      .from(faqs)
+      .where(eq(faqs.isActive, true))
+      .orderBy(asc(faqs.displayOrder));
+  } catch (error) {
+    console.error("[Database] Error fetching FAQs:", error);
+    return [];
+  }
+}
+
+export async function getBlogPosts(limit?: number) {
+  const db = await getDb();
+  if (!db) return [];
+  
+  try {
+    let query = db
+      .select()
+      .from(blogPosts)
+      .where(eq(blogPosts.isPublished, true))
+      .orderBy(desc(blogPosts.publishedAt), asc(blogPosts.displayOrder));
+    
+    if (limit) {
+      query = query.limit(limit) as any;
+    }
+    
+    return await query;
+  } catch (error) {
+    console.error("[Database] Error fetching blog posts:", error);
+    return [];
+  }
+}
+
+export async function getBlogPostBySlug(slug: string) {
+  const db = await getDb();
+  if (!db) return null;
+  
+  try {
+    const result = await db
+      .select()
+      .from(blogPosts)
+      .where(and(eq(blogPosts.slug, slug), eq(blogPosts.isPublished, true)))
+      .limit(1);
+    
+    return result[0] || null;
+  } catch (error) {
+    console.error("[Database] Error fetching blog post by slug:", error);
+    return null;
+  }
+}
+
+
+// ============ Student-Tutor Messaging ============
+
+/**
+ * Get all students (from subscriptions) with their associated tutors
+ */
+export async function getStudentsWithTutors(parentId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    const subs = await db
+      .select({
+        studentFirstName: subscriptions.studentFirstName,
+        studentLastName: subscriptions.studentLastName,
+        studentGrade: subscriptions.studentGrade,
+        studentId: subscriptions.id, // Use subscription ID as student identifier
+        courseId: subscriptions.courseId,
+        courseTitle: courses.title,
+      })
+      .from(subscriptions)
+      .leftJoin(courses, eq(subscriptions.courseId, courses.id))
+      .where(eq(subscriptions.parentId, parentId));
+
+    // Group by student and get their tutors
+    const studentMap = new Map<number, any>();
+    
+    for (const sub of subs) {
+      if (!sub.studentFirstName || !sub.studentLastName) continue;
+      
+      const studentKey = sub.studentId;
+      if (!studentMap.has(studentKey)) {
+        studentMap.set(studentKey, {
+          id: studentKey,
+          firstName: sub.studentFirstName,
+          lastName: sub.studentLastName,
+          grade: sub.studentGrade,
+          tutors: [],
+        });
+      }
+
+      // Get tutors for this course
+      if (sub.courseId) {
+        const tutorList = await db
+          .select({
+            tutorId: courseTutors.tutorId,
+            tutorName: users.name,
+            tutorEmail: users.email,
+          })
+          .from(courseTutors)
+          .leftJoin(tutorProfiles, eq(courseTutors.tutorId, tutorProfiles.id))
+          .leftJoin(users, eq(tutorProfiles.userId, users.id))
+          .where(eq(courseTutors.courseId, sub.courseId));
+
+        const student = studentMap.get(studentKey);
+        for (const tutor of tutorList) {
+          if (tutor.tutorId && !student.tutors.find((t: any) => t.id === tutor.tutorId)) {
+            student.tutors.push({
+              id: tutor.tutorId,
+              name: tutor.tutorName,
+              email: tutor.tutorEmail,
+              courseTitle: sub.courseTitle,
+            });
+          }
+        }
+      }
+    }
+
+    return Array.from(studentMap.values());
+  } catch (error) {
+    console.error("[Database] Error getting students with tutors:", error);
+    return [];
+  }
+}
+
+/**
+ * Get conversation between parent and tutor for a specific student
+ */
+export async function getConversationByStudentAndTutor(
+  parentId: number,
+  tutorId: number,
+  studentId: number
+) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db
+      .select()
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.parentId, parentId),
+          eq(conversations.tutorId, tutorId),
+          eq(conversations.studentId, studentId)
+        )
+      )
+      .limit(1);
+
+    return result[0] || null;
+  } catch (error) {
+    console.error("[Database] Error getting conversation by student and tutor:", error);
+    return null;
+  }
+}
+
+/**
+ * Create or get conversation for a specific student
+ */
+export async function createOrGetStudentConversation(
+  parentId: number,
+  tutorId: number,
+  studentId: number
+) {
+  const existing = await getConversationByStudentAndTutor(parentId, tutorId, studentId);
+  if (existing) return existing;
+
+  const newConv: InsertConversation = {
+    parentId,
+    tutorId,
+    studentId,
+    lastMessageAt: Date.now(),
+  };
+
+  const created = await createConversation(newConv);
+  return created;
+}
+
+
+// ============ Tutor Availability ============
+
+/**
+ * Get all availability slots for a tutor
+ */
+export async function getTutorAvailability(tutorId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    return await db
+      .select()
+      .from(tutorAvailability)
+      .where(eq(tutorAvailability.tutorId, tutorId))
+      .orderBy(asc(tutorAvailability.dayOfWeek), asc(tutorAvailability.startTime));
+  } catch (error) {
+    console.error("[Database] Error fetching tutor availability:", error);
+    return [];
+  }
+}
+
+/**
+ * Create a new availability slot for a tutor
+ */
+export async function createTutorAvailability(availability: InsertTutorAvailability) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(tutorAvailability).values(availability);
+    const insertedId = result[0].insertId;
+    
+    const inserted = await db
+      .select()
+      .from(tutorAvailability)
+      .where(eq(tutorAvailability.id, insertedId))
+      .limit(1);
+    
+    return inserted[0] || null;
+  } catch (error) {
+    console.error("[Database] Error creating tutor availability:", error);
+    return null;
+  }
+}
+
+/**
+ * Update an existing availability slot
+ */
+export async function updateTutorAvailability(
+  id: number,
+  updates: Partial<InsertTutorAvailability>
+) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    await db
+      .update(tutorAvailability)
+      .set(updates)
+      .where(eq(tutorAvailability.id, id));
+    
+    const updated = await db
+      .select()
+      .from(tutorAvailability)
+      .where(eq(tutorAvailability.id, id))
+      .limit(1);
+    
+    return updated[0] || null;
+  } catch (error) {
+    console.error("[Database] Error updating tutor availability:", error);
+    return null;
+  }
+}
+
+/**
+ * Delete an availability slot
+ */
+export async function deleteTutorAvailability(id: number) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .delete(tutorAvailability)
+      .where(eq(tutorAvailability.id, id));
+    return true;
+  } catch (error) {
+    console.error("[Database] Error deleting tutor availability:", error);
+    return false;
+  }
+}
+
+/**
+ * Get all tutors with their availability
+ */
+export async function getAllTutorsWithAvailability() {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    const tutors = await db
+      .select({
+        id: users.id,
+        name: users.name,
+        email: users.email,
+      })
+      .from(users)
+      .where(eq(users.role, "tutor"));
+
+    const tutorsWithAvailability = await Promise.all(
+      tutors.map(async (tutor) => {
+        const availability = await getTutorAvailability(tutor.id);
+        return {
+          ...tutor,
+          availability,
+        };
+      })
+    );
+
+    return tutorsWithAvailability;
+  } catch (error) {
+    console.error("[Database] Error fetching tutors with availability:", error);
+    return [];
+  }
+}
+
+/**
+ * Update course Acuity mapping
+ */
+export async function updateCourseAcuityMapping(
+  courseId: number,
+  acuityAppointmentTypeId: number | null,
+  acuityCalendarId: number | null
+) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .update(courses)
+      .set({
+        acuityAppointmentTypeId,
+        acuityCalendarId,
+      })
+      .where(eq(courses.id, courseId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Error updating course Acuity mapping:", error);
+    return false;
+  }
+}
+
+/**
+ * Get all Acuity mapping templates
+ */
+export async function getAllAcuityMappingTemplates() {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    const templates = await db
+      .select()
+      .from(acuityMappingTemplates)
+      .orderBy(desc(acuityMappingTemplates.createdAt));
+    return templates;
+  } catch (error) {
+    console.error("[Database] Error fetching Acuity mapping templates:", error);
+    return [];
+  }
+}
+
+/**
+ * Get Acuity mapping template by ID
+ */
+export async function getAcuityMappingTemplateById(id: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const [template] = await db
+      .select()
+      .from(acuityMappingTemplates)
+      .where(eq(acuityMappingTemplates.id, id))
+      .limit(1);
+    return template || null;
+  } catch (error) {
+    console.error("[Database] Error fetching Acuity mapping template:", error);
+    return null;
+  }
+}
+
+/**
+ * Create new Acuity mapping template
+ */
+export async function createAcuityMappingTemplate(template: InsertAcuityMappingTemplate) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const [result] = await db
+      .insert(acuityMappingTemplates)
+      .values(template);
+    return result.insertId;
+  } catch (error) {
+    console.error("[Database] Error creating Acuity mapping template:", error);
+    return null;
+  }
+}
+
+/**
+ * Update Acuity mapping template
+ */
+export async function updateAcuityMappingTemplate(
+  id: number,
+  updates: Partial<InsertAcuityMappingTemplate>
+) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .update(acuityMappingTemplates)
+      .set(updates)
+      .where(eq(acuityMappingTemplates.id, id));
+    return true;
+  } catch (error) {
+    console.error("[Database] Error updating Acuity mapping template:", error);
+    return false;
+  }
+}
+
+/**
+ * Delete Acuity mapping template
+ */
+export async function deleteAcuityMappingTemplate(id: number) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .delete(acuityMappingTemplates)
+      .where(eq(acuityMappingTemplates.id, id));
+    return true;
+  } catch (error) {
+    console.error("[Database] Error deleting Acuity mapping template:", error);
+    return false;
+  }
+}
+
+/**
+ * Bulk apply Acuity mapping to multiple courses
+ */
+export async function bulkApplyAcuityMapping(
+  courseIds: number[],
+  acuityAppointmentTypeId: number,
+  acuityCalendarId: number
+) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .update(courses)
+      .set({
+        acuityAppointmentTypeId,
+        acuityCalendarId,
+      })
+      .where(inArray(courses.id, courseIds));
+    return true;
+  } catch (error) {
+    console.error("[Database] Error bulk applying Acuity mapping:", error);
+    return false;
+  }
+}
+
+/**
+ * Get Acuity mapping template by name
+ */
+export async function getMappingTemplateByName(name: string) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db
+      .select()
+      .from(acuityMappingTemplates)
+      .where(eq(acuityMappingTemplates.name, name))
+      .limit(1);
+    return result[0] || null;
+  } catch (error) {
+    console.error("[Database] Error getting mapping template by name:", error);
+    return null;
+  }
+}
+
+// ============ Email Settings ============
+
+/**
+ * Get current email settings (returns first row or default values)
+ */
+export async function getEmailSettings() {
+  const db = await getDb();
+  if (!db) return null;
+  
+  const settings = await db.select().from(emailSettings).limit(1);
+  
+  if (settings.length === 0) {
+    // Return default settings if none exist
+    return {
+      id: 0,
+      logoUrl: null,
+      primaryColor: "#667eea",
+      accentColor: "#764ba2",
+      footerText: "EdKonnect Academy - Connecting Students with Expert Tutors",
+      companyName: "EdKonnect Academy",
+      supportEmail: "support@edkonnect.com",
+      updatedBy: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+  }
+  
+  return settings[0];
+}
+
+/**
+ * Update or create email settings
+ */
+export async function updateEmailSettings(data: {
+  logoUrl?: string | null;
+  primaryColor?: string;
+  accentColor?: string;
+  footerText?: string;
+  companyName?: string;
+  supportEmail?: string;
+  updatedBy: number;
+}) {
+  const db = await getDb();
+  if (!db) return null;
+  
+  const existing = await db.select().from(emailSettings).limit(1);
+  
+  if (existing.length === 0) {
+    // Create new settings
+    const result = await db.insert(emailSettings).values(data as InsertEmailSettings);
+    return result[0].insertId;
+  } else {
+    // Update existing settings
+    await db.update(emailSettings)
+      .set(data)
+      .where(eq(emailSettings.id, existing[0].id));
+    return existing[0].id;
+  }
+}
+
+// ============ Booking Management ============
+
+/**
+ * Get session by management token
+ */
+export async function getSessionByToken(token: string) {
+  const db = await getDb();
+  if (!db) return null;
+  
+  const result = await db
+    .select()
+    .from(sessions)
+    .where(eq(sessions.managementToken, token))
+    .limit(1);
+  
+  return result[0] || null;
+}
+
+/**
+ * Update session management token
+ */
+export async function updateSessionToken(sessionId: number, token: string) {
+  const db = await getDb();
+  if (!db) return false;
+  
+  try {
+    const result = await db
+      .update(sessions)
+      .set({ managementToken: token })
+      .where(eq(sessions.id, sessionId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update session token:", error);
+    return false;
+  }
+}
+
+/**
+ * Cancel session by ID
+ */
+export async function cancelSession(sessionId: number) {
+  const db = await getDb();
+  if (!db) return false;
+  
+  try {
+    const result = await db
+      .update(sessions)
+      .set({ 
+        status: "cancelled",
+        updatedAt: new Date()
+      })
+      .where(eq(sessions.id, sessionId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to cancel session:", error);
+    return false;
+  }
+}
+
+/**
+ * Update session scheduled time (for rescheduling)
+ */
+export async function rescheduleSession(sessionId: number, newScheduledAt: number) {
+  const db = await getDb();
+  if (!db) return false;
+  
+  try {
+    const result = await db
+      .update(sessions)
+      .set({ 
+        scheduledAt: newScheduledAt,
+        updatedAt: new Date()
+      })
+      .where(eq(sessions.id, sessionId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to reschedule session:", error);
+    return false;
+  }
+}
+
+/**
+ * Get session with related data (subscription, course, tutor, parent)
+ */
+export async function getSessionWithDetails(sessionId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  
+  const result = await db
+    .select({
+      session: sessions,
+      subscription: subscriptions,
+      course: courses,
+      tutor: tutorProfiles,
+      tutorUser: users,
+      parent: users,
+    })
+    .from(sessions)
+    .leftJoin(subscriptions, eq(sessions.subscriptionId, subscriptions.id))
+    .leftJoin(courses, eq(subscriptions.courseId, courses.id))
+    .leftJoin(tutorProfiles, eq(sessions.tutorId, tutorProfiles.userId))
+    .leftJoin(users, eq(tutorProfiles.userId, users.id))
+    .where(eq(sessions.id, sessionId))
+    .limit(1);
+  
+  if (result.length === 0) return null;
+  
+  const row = result[0];
+  
+  // Get parent user separately
+  const parentResult = await db
+    .select()
+    .from(users)
+    .where(eq(users.id, row.session.parentId))
+    .limit(1);
+  
+  return {
+    ...row.session,
+    subscription: row.subscription,
+    course: row.course,
+    tutor: row.tutor,
+    tutorUser: row.tutorUser,
+    parentUser: parentResult[0] || null,
+  };
+}
+
+
+
+// ============ Tutor Time Blocks ============
+
+/**
+ * Get all time blocks for a tutor
+ */
+export async function getTutorTimeBlocks(tutorId: number, startTime?: number, endTime?: number) {
+  const db = await getDb();
+  if (!db) return [];
+  
+  try {
+    // Build conditions
+    const conditions = [eq(tutorTimeBlocks.tutorId, tutorId)];
+    
+    // Add time range filter if provided
+    if (startTime !== undefined && endTime !== undefined) {
+      conditions.push(
+        gte(tutorTimeBlocks.endTime, startTime),
+        lte(tutorTimeBlocks.startTime, endTime)
+      );
+    }
+    
+    return await db
+      .select()
+      .from(tutorTimeBlocks)
+      .where(and(...conditions))
+      .orderBy(asc(tutorTimeBlocks.startTime));
+  } catch (error) {
+    console.error("[Database] Failed to get tutor time blocks:", error);
+    return [];
+  }
+}
+
+/**
+ * Create time block for a tutor
+ */
+export async function createTutorTimeBlock(data: InsertTutorTimeBlock) {
+  const db = await getDb();
+  if (!db) return null;
+  
+  try {
+    const result = await db.insert(tutorTimeBlocks).values(data);
+    const insertedId = result[0].insertId;
+    
+    const inserted = await db
+      .select()
+      .from(tutorTimeBlocks)
+      .where(eq(tutorTimeBlocks.id, insertedId))
+      .limit(1);
+    
+    return inserted[0] || null;
+  } catch (error) {
+    console.error("[Database] Failed to create tutor time block:", error);
+    return null;
+  }
+}
+
+/**
+ * Update time block
+ */
+export async function updateTutorTimeBlock(id: number, data: Partial<InsertTutorTimeBlock>) {
+  const db = await getDb();
+  if (!db) return false;
+  
+  try {
+    await db
+      .update(tutorTimeBlocks)
+      .set(data)
+      .where(eq(tutorTimeBlocks.id, id));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update tutor time block:", error);
+    return false;
+  }
+}
+
+/**
+ * Delete time block
+ */
+export async function deleteTutorTimeBlock(id: number) {
+  const db = await getDb();
+  if (!db) return false;
+  
+  try {
+    await db
+      .delete(tutorTimeBlocks)
+      .where(eq(tutorTimeBlocks.id, id));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to delete tutor time block:", error);
+    return false;
+  }
+}
+
+/**
+ * Check if a tutor is available at a specific time
+ */
+export async function isTutorAvailable(tutorId: number, startTime: number, endTime: number): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  
+  // Check if there are any time blocks that overlap with the requested time
+  const blocks = await db
+    .select()
+    .from(tutorTimeBlocks)
+    .where(
+      and(
+        eq(tutorTimeBlocks.tutorId, tutorId),
+        // Check for overlap: block.start < requested.end AND block.end > requested.start
+        lt(tutorTimeBlocks.startTime, endTime),
+        gt(tutorTimeBlocks.endTime, startTime)
+      )
+    )
+    .limit(1);
+  
+  // If there are overlapping blocks, tutor is not available
+  if (blocks.length > 0) {
+    return false;
+  }
+  
+  // Check if the requested time falls within tutor's regular availability
+  const requestedDate = new Date(startTime);
+  const dayOfWeek = requestedDate.getDay();
+  const requestedStartTime = `${requestedDate.getHours().toString().padStart(2, '0')}:${requestedDate.getMinutes().toString().padStart(2, '0')}`;
+  const requestedEndDate = new Date(endTime);
+  const requestedEndTime = `${requestedEndDate.getHours().toString().padStart(2, '0')}:${requestedEndDate.getMinutes().toString().padStart(2, '0')}`;
+  
+  const availabilitySlots = await db
+    .select()
+    .from(tutorAvailability)
+    .where(
+      and(
+        eq(tutorAvailability.tutorId, tutorId),
+        eq(tutorAvailability.dayOfWeek, dayOfWeek),
+        eq(tutorAvailability.isActive, true),
+        lte(tutorAvailability.startTime, requestedStartTime),
+        gte(tutorAvailability.endTime, requestedEndTime)
+      )
+    )
+    .limit(1);
+  
+  // Tutor is available if there's at least one matching availability slot
+  return availabilitySlots.length > 0;
+}
+
+
+// ============ Session Notes ============
+
+/**
+ * Create a new session note
+ */
+export async function createSessionNote(note: InsertSessionNote) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(sessionNotes).values(note);
+    const insertedId = result[0].insertId;
+    
+    const inserted = await db
+      .select()
+      .from(sessionNotes)
+      .where(eq(sessionNotes.id, insertedId))
+      .limit(1);
+    
+    return inserted[0] || null;
+  } catch (error) {
+    console.error("[Database] Error creating session note:", error);
+    return null;
+  }
+}
+
+/**
+ * Get session note by ID
+ */
+export async function getSessionNoteById(id: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db
+      .select()
+      .from(sessionNotes)
+      .where(eq(sessionNotes.id, id))
+      .limit(1);
+    
+    return result[0] || null;
+  } catch (error) {
+    console.error("[Database] Error getting session note:", error);
+    return null;
+  }
+}
+
+/**
+ * Get session note by session ID
+ */
+export async function getSessionNoteBySessionId(sessionId: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db
+      .select()
+      .from(sessionNotes)
+      .where(eq(sessionNotes.sessionId, sessionId))
+      .limit(1);
+    
+    return result[0] || null;
+  } catch (error) {
+    console.error("[Database] Error getting session note by session ID:", error);
+    return null;
+  }
+}
+
+/**
+ * Get all session notes for a tutor
+ */
+export async function getSessionNotesByTutorId(tutorId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    const result = await db
+      .select()
+      .from(sessionNotes)
+      .where(eq(sessionNotes.tutorId, tutorId))
+      .orderBy(desc(sessionNotes.createdAt));
+    
+    return result;
+  } catch (error) {
+    console.error("[Database] Error getting tutor session notes:", error);
+    return [];
+  }
+}
+
+/**
+ * Get all session notes for a parent
+ */
+export async function getSessionNotesByParentId(parentId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    const result = await db
+      .select()
+      .from(sessionNotes)
+      .where(eq(sessionNotes.parentId, parentId))
+      .orderBy(desc(sessionNotes.createdAt));
+    
+    return result;
+  } catch (error) {
+    console.error("[Database] Error getting parent session notes:", error);
+    return [];
+  }
+}
+
+/**
+ * Update a session note
+ */
+export async function updateSessionNote(id: number, updates: Partial<InsertSessionNote>) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    await db
+      .update(sessionNotes)
+      .set(updates)
+      .where(eq(sessionNotes.id, id));
+    
+    return await getSessionNoteById(id);
+  } catch (error) {
+    console.error("[Database] Error updating session note:", error);
+    return null;
+  }
+}
+
+/**
+ * Delete a session note
+ */
+export async function deleteSessionNote(id: number) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .delete(sessionNotes)
+      .where(eq(sessionNotes.id, id));
+    
+    return true;
+  } catch (error) {
+    console.error("[Database] Error deleting session note:", error);
+    return false;
+  }
+}
+
+/**
+ * Mark session note as parent notified
+ */
+export async function markSessionNoteAsNotified(id: number) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .update(sessionNotes)
+      .set({ parentNotified: true })
+      .where(eq(sessionNotes.id, id));
+    
+    return true;
+  } catch (error) {
+    console.error("[Database] Error marking session note as notified:", error);
+    return false;
+  }
+}
+
+
+// ============ Session Note Attachments ============
+
+/**
+ * Create a new session note attachment
+ */
+export async function createSessionNoteAttachment(attachment: InsertSessionNoteAttachment) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(sessionNoteAttachments).values(attachment);
+    const insertedId = result[0].insertId;
+    
+    const inserted = await db
+      .select()
+      .from(sessionNoteAttachments)
+      .where(eq(sessionNoteAttachments.id, insertedId))
+      .limit(1);
+    
+    return inserted[0] || null;
+  } catch (error) {
+    console.error("[Database] Error creating session note attachment:", error);
+    return null;
+  }
+}
+
+/**
+ * Get all attachments for a session note
+ */
+export async function getSessionNoteAttachments(sessionNoteId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    const result = await db
+      .select()
+      .from(sessionNoteAttachments)
+      .where(eq(sessionNoteAttachments.sessionNoteId, sessionNoteId))
+      .orderBy(asc(sessionNoteAttachments.createdAt));
+    
+    return result;
+  } catch (error) {
+    console.error("[Database] Error getting session note attachments:", error);
+    return [];
+  }
+}
+
+/**
+ * Get attachment by ID
+ */
+export async function getSessionNoteAttachmentById(id: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db
+      .select()
+      .from(sessionNoteAttachments)
+      .where(eq(sessionNoteAttachments.id, id))
+      .limit(1);
+    
+    return result[0] || null;
+  } catch (error) {
+    console.error("[Database] Error getting session note attachment:", error);
+    return null;
+  }
+}
+
+/**
+ * Delete a session note attachment
+ */
+export async function deleteSessionNoteAttachment(id: number) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .delete(sessionNoteAttachments)
+      .where(eq(sessionNoteAttachments.id, id));
+    
+    return true;
+  } catch (error) {
+    console.error("[Database] Error deleting session note attachment:", error);
+    return false;
+  }
+}
+
+// ============ Tutor Reviews Management ============
+
+export async function createTutorReview(review: InsertTutorReview) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(tutorReviews).values(review) as any;
+    const reviewId = Number(result[0].insertId);
+
+    // Update tutor profile rating and review count
+    await updateTutorRatingStats(review.tutorId);
+
+    return reviewId;
+  } catch (error) {
+    console.error("[Database] Failed to create tutor review:", error);
+    return null;
+  }
+}
+
+export async function getTutorReviews(tutorId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db
+    .select({
+      id: tutorReviews.id,
+      rating: tutorReviews.rating,
+      review: tutorReviews.review,
+      createdAt: tutorReviews.createdAt,
+      parentName: users.name,
+    })
+    .from(tutorReviews)
+    .innerJoin(users, eq(tutorReviews.parentId, users.id))
+    .where(eq(tutorReviews.tutorId, tutorId))
+    .orderBy(desc(tutorReviews.createdAt));
+}
+
+export async function getTutorAverageRating(tutorId: number): Promise<number> {
+  const db = await getDb();
+  if (!db) return 0;
+
+  const result = await db
+    .select({
+      avgRating: sql<number>`AVG(${tutorReviews.rating})`,
+    })
+    .from(tutorReviews)
+    .where(eq(tutorReviews.tutorId, tutorId));
+
+  return result[0]?.avgRating ? Number(result[0].avgRating.toFixed(2)) : 0;
+}
+
+export async function updateTutorRatingStats(tutorId: number) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    const reviews = await db
+      .select()
+      .from(tutorReviews)
+      .where(eq(tutorReviews.tutorId, tutorId));
+
+    const totalReviews = reviews.length;
+    const avgRating = totalReviews > 0
+      ? reviews.reduce((sum, r) => sum + r.rating, 0) / totalReviews
+      : 0;
+
+    await db
+      .update(tutorProfiles)
+      .set({
+        rating: avgRating.toFixed(2),
+        totalReviews,
+      })
+      .where(eq(tutorProfiles.userId, tutorId));
+
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update tutor rating stats:", error);
+    return false;
+  }
+}
+
+// ============ Tutor Filtering & Search ============
+
+export interface TutorFilterOptions {
+  subjects?: string[];
+  gradeLevels?: string[];
+  minRate?: number;
+  maxRate?: number;
+  minRating?: number;
+  dayOfWeek?: number;
+  startTime?: string;
+  endTime?: string;
+}
+
+export async function searchTutors(filters: TutorFilterOptions) {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    // Start with base query for active tutors
+    let query = db
+      .select({
+        id: tutorProfiles.id,
+        userId: tutorProfiles.userId,
+        bio: tutorProfiles.bio,
+        qualifications: tutorProfiles.qualifications,
+        subjects: tutorProfiles.subjects,
+        gradeLevels: tutorProfiles.gradeLevels,
+        hourlyRate: tutorProfiles.hourlyRate,
+        yearsOfExperience: tutorProfiles.yearsOfExperience,
+        profileImageUrl: tutorProfiles.profileImageUrl,
+        acuityLink: tutorProfiles.acuityLink,
+        rating: tutorProfiles.rating,
+        totalReviews: tutorProfiles.totalReviews,
+        userName: users.name,
+        userEmail: users.email,
+      })
+      .from(tutorProfiles)
+      .innerJoin(users, eq(tutorProfiles.userId, users.id))
+      .where(
+        and(
+          eq(tutorProfiles.isActive, true),
+          eq(tutorProfiles.approvalStatus, 'approved')
+        )
+      );
+
+    let results = await query;
+
+    // Apply subject filter (subjects are stored as JSON array in text field)
+    if (filters.subjects && filters.subjects.length > 0) {
+      results = results.filter(tutor => {
+        if (!tutor.subjects) return false;
+        try {
+          const tutorSubjects = JSON.parse(tutor.subjects as string);
+          return filters.subjects!.some(subject =>
+            tutorSubjects.includes(subject)
+          );
+        } catch {
+          return false;
+        }
+      });
+    }
+
+    // Apply grade level filter (gradeLevels are stored as JSON array in text field)
+    if (filters.gradeLevels && filters.gradeLevels.length > 0) {
+      results = results.filter(tutor => {
+        if (!tutor.gradeLevels) return false;
+        try {
+          const tutorGradeLevels = JSON.parse(tutor.gradeLevels as string);
+          return filters.gradeLevels!.some(gradeLevel =>
+            tutorGradeLevels.includes(gradeLevel)
+          );
+        } catch {
+          return false;
+        }
+      });
+    }
+
+    // Apply hourly rate filter
+    if (filters.minRate !== undefined) {
+      results = results.filter(tutor => {
+        const rate = tutor.hourlyRate ? parseFloat(tutor.hourlyRate as string) : 0;
+        return rate >= filters.minRate!;
+      });
+    }
+
+    if (filters.maxRate !== undefined) {
+      results = results.filter(tutor => {
+        const rate = tutor.hourlyRate ? parseFloat(tutor.hourlyRate as string) : 0;
+        return rate <= filters.maxRate!;
+      });
+    }
+
+    // Apply rating filter
+    if (filters.minRating) {
+      results = results.filter(tutor => {
+        const rating = tutor.rating ? parseFloat(tutor.rating as string) : 0;
+        return rating >= filters.minRating!;
+      });
+    }
+
+    // Apply availability filter
+    if (filters.dayOfWeek !== undefined && filters.startTime && filters.endTime) {
+      const availableTutorIds = await getTutorsAvailableAt(
+        filters.dayOfWeek,
+        filters.startTime,
+        filters.endTime
+      );
+
+      results = results.filter(tutor =>
+        availableTutorIds.includes(tutor.userId)
+      );
+    }
+
+    return results;
+  } catch (error) {
+    console.error("[Database] Failed to search tutors:", error);
+    return [];
+  }
+}
+
+async function getTutorsAvailableAt(
+  dayOfWeek: number,
+  startTime: string,
+  endTime: string
+): Promise<number[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    const availableSlots = await db
+      .select({ tutorId: tutorAvailability.tutorId })
+      .from(tutorAvailability)
+      .where(
+        and(
+          eq(tutorAvailability.dayOfWeek, dayOfWeek),
+          lte(tutorAvailability.startTime, startTime),
+          gte(tutorAvailability.endTime, endTime)
+        )
+      );
+
+    return availableSlots.map(slot => slot.tutorId);
+  } catch (error) {
+    console.error("[Database] Failed to get available tutors:", error);
+    return [];
+  }
+}
+
+
+// ============ Tutor Recommendations ============
+
+// Get similar tutors based on subject overlap and ratings
+export async function getSimilarTutors(tutorId: number, limit: number = 2) {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    const tutor = await db
+      .select()
+      .from(tutorProfiles)
+      .where(eq(tutorProfiles.userId, tutorId))
+      .limit(1);
+
+    if (tutor.length === 0) return [];
+
+    const currentTutor = tutor[0];
+    const currentSubjects = currentTutor.subjects ? JSON.parse(currentTutor.subjects) : [];
+
+    // Get all other active tutors with video introductions
+    const allTutors = await db
+      .select({
+        id: tutorProfiles.id,
+        userId: tutorProfiles.userId,
+        userName: users.name,
+        bio: tutorProfiles.bio,
+        subjects: tutorProfiles.subjects,
+        gradeLevels: tutorProfiles.gradeLevels,
+        hourlyRate: tutorProfiles.hourlyRate,
+        rating: tutorProfiles.rating,
+        totalReviews: tutorProfiles.totalReviews,
+        introVideoUrl: tutorProfiles.introVideoUrl,
+      })
+      .from(tutorProfiles)
+      .innerJoin(users, eq(tutorProfiles.userId, users.id))
+      .where(and(
+        eq(tutorProfiles.isActive, true),
+        sql`${tutorProfiles.userId} != ${tutorId}`
+      ));
+
+    // Calculate similarity score for each tutor
+    const tutorsWithScore = allTutors.map(t => {
+      const tutorSubjects = t.subjects ? JSON.parse(t.subjects) : [];
+      const subjectOverlap = currentSubjects.filter((s: string) => tutorSubjects.includes(s)).length;
+      const rating = t.rating ? parseFloat(t.rating) : 0;
+      
+      // Score: subject overlap is weighted higher, then rating
+      // Boost score if tutor has video
+      const videoBoost = t.introVideoUrl ? 2 : 0;
+      const score = (subjectOverlap * 10) + rating + videoBoost;
+      
+      return { ...t, score, subjectOverlap };
+    });
+
+    // Sort by score descending and return top N
+    return tutorsWithScore
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+  } catch (error) {
+    console.error("[Database] Failed to get similar tutors:", error);
+    return [];
+  }
+}
+
+
+// ============ Parent Dashboard ============
+
+// Get parent's upcoming sessions
+export async function getParentUpcomingSessions(parentId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    const now = Date.now();
+    
+    return await db
+      .select({
+        id: sessions.id,
+        tutorId: sessions.tutorId,
+        tutorName: users.name,
+        parentId: sessions.parentId,
+        scheduledAt: sessions.scheduledAt,
+        duration: sessions.duration,
+        status: sessions.status,
+        acuityAppointmentId: sessions.acuityAppointmentId,
+      })
+      .from(sessions)
+      .innerJoin(users, eq(sessions.tutorId, users.id))
+      .where(and(
+        eq(sessions.parentId, parentId),
+        gte(sessions.scheduledAt, now)
+      ))
+      .orderBy(asc(sessions.scheduledAt));
+  } catch (error) {
+    console.error("[Database] Failed to get parent upcoming sessions:", error);
+    return [];
+  }
+}
+
+// Get parent's past sessions
+export async function getParentPastSessions(parentId: number, limit: number = 10) {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    const now = Date.now();
+    
+    return await db
+      .select({
+        id: sessions.id,
+        tutorId: sessions.tutorId,
+        tutorName: users.name,
+        parentId: sessions.parentId,
+        scheduledAt: sessions.scheduledAt,
+        duration: sessions.duration,
+        status: sessions.status,
+      })
+      .from(sessions)
+      .innerJoin(users, eq(sessions.tutorId, users.id))
+      .where(and(
+        eq(sessions.parentId, parentId),
+        lt(sessions.scheduledAt, now)
+      ))
+      .orderBy(desc(sessions.scheduledAt))
+      .limit(limit);
+  } catch (error) {
+    console.error("[Database] Failed to get parent past sessions:", error);
+    return [];
+  }
+}
+
+// Get parent's session notes
+export async function getParentSessionNotes(parentId: number, limit: number = 10) {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    return await db
+      .select({
+        id: sessionNotes.id,
+        sessionId: sessionNotes.sessionId,
+        tutorId: sessionNotes.tutorId,
+        tutorName: users.name,
+        progressSummary: sessionNotes.progressSummary,
+        homework: sessionNotes.homework,
+        challenges: sessionNotes.challenges,
+        nextSteps: sessionNotes.nextSteps,
+        createdAt: sessionNotes.createdAt,
+        scheduledAt: sessions.scheduledAt,
+      })
+      .from(sessionNotes)
+      .innerJoin(sessions, eq(sessionNotes.sessionId, sessions.id))
+      .innerJoin(users, eq(sessionNotes.tutorId, users.id))
+      .where(eq(sessions.parentId, parentId))
+      .orderBy(desc(sessionNotes.createdAt))
+      .limit(limit);
+  } catch (error) {
+    console.error("[Database] Failed to get parent session notes:", error);
+    return [];
+  }
+}
+
+// Get parent's payment history
+export async function getParentPayments(parentId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    return await db
+      .select({
+        id: payments.id,
+        amount: payments.amount,
+        currency: payments.currency,
+        status: payments.status,
+        stripePaymentIntentId: payments.stripePaymentIntentId,
+        createdAt: payments.createdAt,
+        sessionId: payments.sessionId,
+        tutorName: users.name,
+        scheduledAt: sessions.scheduledAt,
+      })
+      .from(payments)
+      .leftJoin(sessions, eq(payments.sessionId, sessions.id))
+      .leftJoin(users, eq(sessions.tutorId, users.id))
+      .where(eq(payments.parentId, parentId))
+      .orderBy(desc(payments.createdAt));
+  } catch (error) {
+    console.error("[Database] Failed to get parent payments:", error);
+    return [];
+  }
+}
+
+// Get parent dashboard statistics
+export async function getParentDashboardStats(parentId: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    // Get total sessions
+    const totalSessionsResult = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(sessions)
+      .where(eq(sessions.parentId, parentId));
+    
+    const totalSessions = totalSessionsResult[0]?.count || 0;
+
+    // Get total spending
+    const totalSpendingResult = await db
+      .select({ total: sql<string>`sum(${payments.amount})` })
+      .from(payments)
+      .where(and(
+        eq(payments.parentId, parentId),
+        sql`${payments.status} = 'succeeded'`
+      ));
+    
+    const totalSpending = totalSpendingResult[0]?.total || '0';
+
+    // Get active tutors count (tutors with sessions)
+    const activeTutorsResult = await db
+      .select({ count: sql<number>`count(distinct ${sessions.tutorId})` })
+      .from(sessions)
+      .where(eq(sessions.parentId, parentId));
+    
+    const activeTutors = activeTutorsResult[0]?.count || 0;
+
+    // Get upcoming sessions count
+    const now = Date.now();
+    const upcomingSessionsResult = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(sessions)
+      .where(and(
+        eq(sessions.parentId, parentId),
+        gte(sessions.scheduledAt, now)
+      ));
+    
+    const upcomingSessions = upcomingSessionsResult[0]?.count || 0;
+
+    return {
+      totalSessions,
+      totalSpending: parseFloat(totalSpending),
+      activeTutors,
+      upcomingSessions,
+    };
+  } catch (error) {
+    console.error("[Database] Failed to get parent dashboard stats:", error);
+    return null;
+  }
+}
+
+// ============ Notification Management ============
+
+export async function getNotificationPreferences(userId: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db
+    .select()
+    .from(notificationPreferences)
+    .where(eq(notificationPreferences.userId, userId))
+    .limit(1);
+  
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function upsertNotificationPreferences(userId: number, prefs: Partial<InsertNotificationPreference>) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    const existing = await getNotificationPreferences(userId);
+    
+    if (existing) {
+      await db
+        .update(notificationPreferences)
+        .set(prefs)
+        .where(eq(notificationPreferences.userId, userId));
+    } else {
+      await db.insert(notificationPreferences).values({
+        userId,
+        ...prefs,
+      } as InsertNotificationPreference);
+    }
+    
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to upsert notification preferences:", error);
+    return false;
+  }
+}
+
+export async function createNotificationLog(log: InsertNotificationLog) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(notificationLogs).values(log) as any;
+    return Number(result.insertId);
+  } catch (error) {
+    console.error("[Database] Failed to create notification log:", error);
+    return null;
+  }
+}
+
+export async function getNotificationLogs(userId: number, limit: number = 50) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db
+    .select()
+    .from(notificationLogs)
+    .where(eq(notificationLogs.userId, userId))
+    .orderBy(desc(notificationLogs.sentAt))
+    .limit(limit);
+}
+
+export async function createInAppNotification(notification: InsertInAppNotification) {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const result = await db.insert(inAppNotifications).values(notification) as any;
+    return Number(result.insertId);
+  } catch (error) {
+    console.error("[Database] Failed to create in-app notification:", error);
+    return null;
+  }
+}
+
+export async function getInAppNotifications(userId: number, includeRead: boolean = false) {
+  const db = await getDb();
+  if (!db) return [];
+
+  let conditions = [eq(inAppNotifications.userId, userId)];
+  
+  if (!includeRead) {
+    conditions.push(eq(inAppNotifications.isRead, false));
+  }
+
+  return await db
+    .select()
+    .from(inAppNotifications)
+    .where(and(...conditions))
+    .orderBy(desc(inAppNotifications.createdAt))
+    .limit(50);
+}
+
+export async function markNotificationAsRead(notificationId: number) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .update(inAppNotifications)
+      .set({ isRead: true, readAt: new Date() })
+      .where(eq(inAppNotifications.id, notificationId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to mark notification as read:", error);
+    return false;
+  }
+}
+
+export async function markAllNotificationsAsRead(userId: number) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    await db
+      .update(inAppNotifications)
+      .set({ isRead: true, readAt: new Date() })
+      .where(and(
+        eq(inAppNotifications.userId, userId),
+        eq(inAppNotifications.isRead, false)
+      ));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to mark all notifications as read:", error);
+    return false;
+  }
+}
+
+export async function getUnreadNotificationCount(userId: number) {
+  const db = await getDb();
+  if (!db) return 0;
+
+  const result = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(inAppNotifications)
+    .where(and(
+      eq(inAppNotifications.userId, userId),
+      eq(inAppNotifications.isRead, false)
+    ));
+
+  return result[0]?.count || 0;
+}
+
+export async function getUpcomingSessionsForNotifications(timingMinutes: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  const now = Date.now();
+  const targetTime = now + (timingMinutes * 60 * 1000);
+  const windowStart = targetTime - (5 * 60 * 1000); // 5 minute window
+  const windowEnd = targetTime + (5 * 60 * 1000);
+
+  return await db
+    .select({
+      session: sessions,
+      parent: users,
+      tutor: { id: users.id, name: users.name, email: users.email },
+      course: courses,
+    })
+    .from(sessions)
+    .innerJoin(users, eq(sessions.parentId, users.id))
+    .leftJoin(subscriptions, eq(sessions.subscriptionId, subscriptions.id))
+    .leftJoin(courses, eq(subscriptions.courseId, courses.id))
+    .where(and(
+      eq(sessions.status, "scheduled"),
+      gte(sessions.scheduledAt, windowStart),
+      lte(sessions.scheduledAt, windowEnd)
+    ));
+}
+
+
+// ============ Additional Course Management Functions ============
+
+export async function deleteCourse(courseId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db.delete(courses).where(eq(courses.id, courseId));
+  return true;
+}
+
+export async function getAllCoursesWithTutors(filters?: {
+  search?: string;
+  subject?: string;
+  isActive?: boolean;
+}) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const allCourses = await db.select().from(courses);
+  let filteredCourses = allCourses;
+
+  if (filters?.search) {
+    const searchLower = filters.search.toLowerCase();
+    filteredCourses = filteredCourses.filter(
+      (c: any) =>
+        c.title.toLowerCase().includes(searchLower) ||
+        c.description?.toLowerCase().includes(searchLower)
+    );
+  }
+
+  if (filters?.subject) {
+    filteredCourses = filteredCourses.filter((c: any) => c.subject === filters.subject);
+  }
+
+  if (filters?.isActive !== undefined) {
+    filteredCourses = filteredCourses.filter((c: any) => c.isActive === filters.isActive);
+  }
+
+  // Get assigned tutors for each course
+  const coursesWithTutors = await Promise.all(
+    filteredCourses.map(async (course: any) => {
+      const assignments = await db
+        .select({
+          tutorId: courseTutors.tutorId,
+          tutorName: users.name,
+          tutorEmail: users.email,
+          isPrimary: courseTutors.isPrimary,
+        })
+        .from(courseTutors)
+        .leftJoin(users, eq(courseTutors.tutorId, users.id))
+        .where(eq(courseTutors.courseId, course.id));
+
+      return {
+        ...course,
+        assignedTutors: assignments,
+      };
+    })
+  );
+
+  return coursesWithTutors;
+}
+
+export async function getCourseAssignments(courseId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const assignments = await db
+    .select({
+      tutorId: courseTutors.tutorId,
+      tutorName: users.name,
+      tutorEmail: users.email,
+      isPrimary: courseTutors.isPrimary,
+      createdAt: courseTutors.createdAt,
+    })
+    .from(courseTutors)
+    .leftJoin(users, eq(courseTutors.tutorId, users.id))
+    .where(eq(courseTutors.courseId, courseId));
+
+  return assignments;
+}
+
+export async function getAllTutorsForAssignment() {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const tutors = await db
+    .select({
+      id: users.id,
+      name: users.name,
+      email: users.email,
+    })
+    .from(users)
+    .where(eq(users.role, "tutor"));
+
+  return tutors;
+}
+
+// Tutor Registration & Approval Functions
+export async function getPendingTutors() {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const pendingTutors = await db
+    .select({
+      id: tutorProfiles.id,
+      userId: tutorProfiles.userId,
+      name: users.name,
+      email: users.email,
+      bio: tutorProfiles.bio,
+      qualifications: tutorProfiles.qualifications,
+      yearsOfExperience: tutorProfiles.yearsOfExperience,
+      hourlyRate: tutorProfiles.hourlyRate,
+      subjects: tutorProfiles.subjects,
+      gradeLevels: tutorProfiles.gradeLevels,
+      createdAt: tutorProfiles.createdAt,
+    })
+    .from(tutorProfiles)
+    .leftJoin(users, eq(tutorProfiles.userId, users.id))
+    .where(eq(tutorProfiles.approvalStatus, "pending"));
+
+  return pendingTutors;
+}
+
+export async function getApprovedTutors() {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const approvedTutors = await db
+    .select({
+      id: tutorProfiles.id,
+      userId: tutorProfiles.userId,
+      name: users.name,
+      email: users.email,
+      bio: tutorProfiles.bio,
+      hourlyRate: tutorProfiles.hourlyRate,
+      subjects: tutorProfiles.subjects,
+      gradeLevels: tutorProfiles.gradeLevels,
+      approvedAt: tutorProfiles.updatedAt,
+    })
+    .from(tutorProfiles)
+    .leftJoin(users, eq(tutorProfiles.userId, users.id))
+    .where(eq(tutorProfiles.approvalStatus, "approved"));
+
+  return approvedTutors;
+}
+
+export async function approveTutor(profileId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db
+    .update(tutorProfiles)
+    .set({
+      approvalStatus: "approved",
+      updatedAt: new Date(),
+    })
+    .where(eq(tutorProfiles.id, profileId));
+
+  return { success: true };
+}
+
+export async function rejectTutor(profileId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db
+    .update(tutorProfiles)
+    .set({
+      approvalStatus: "rejected",
+      updatedAt: new Date(),
+    })
+    .where(eq(tutorProfiles.id, profileId));
+
+  return { success: true };
+}
+
+// ============ Tutor Dashboard Functions ============
+
+export async function getUpcomingSessionsByTutorId(tutorId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  const now = Date.now(); // Current timestamp in milliseconds
+  
+  try {
+    const results = await db
+      .select({
+        id: sessions.id,
+        parentId: sessions.parentId,
+        tutorId: sessions.tutorId,
+        subscriptionId: sessions.subscriptionId,
+        scheduledAt: sessions.scheduledAt,
+        duration: sessions.duration,
+        status: sessions.status,
+        notes: sessions.notes,
+        parentName: users.name,
+        parentEmail: users.email,
+        courseTitle: courses.title,
+      })
+      .from(sessions)
+      .leftJoin(users, eq(sessions.parentId, users.id))
+      .leftJoin(subscriptions, eq(sessions.subscriptionId, subscriptions.id))
+      .leftJoin(courses, eq(subscriptions.courseId, courses.id))
+      .where(
+        and(
+          eq(sessions.tutorId, tutorId),
+          gte(sessions.scheduledAt, now),
+          eq(sessions.status, 'scheduled')
+        )
+      )
+      .orderBy(asc(sessions.scheduledAt))
+      .limit(50);
+
+    return results;
+  } catch (error) {
+    console.error("[Database] Failed to fetch upcoming sessions:", error);
+    return [];
+  }
+}
+
+export async function getPastSessionsByTutorId(tutorId: number, limit: number = 20, offset: number = 0) {
+  const db = await getDb();
+  if (!db) return [];
+
+  const now = Date.now(); // Current timestamp in milliseconds
+  
+  try {
+    const results = await db
+      .select({
+        id: sessions.id,
+        parentId: sessions.parentId,
+        tutorId: sessions.tutorId,
+        subscriptionId: sessions.subscriptionId,
+        scheduledAt: sessions.scheduledAt,
+        duration: sessions.duration,
+        status: sessions.status,
+        notes: sessions.notes,
+        feedbackFromTutor: sessions.feedbackFromTutor,
+        feedbackFromParent: sessions.feedbackFromParent,
+        rating: sessions.rating,
+        parentName: users.name,
+        parentEmail: users.email,
+        courseTitle: courses.title,
+      })
+      .from(sessions)
+      .leftJoin(users, eq(sessions.parentId, users.id))
+      .leftJoin(subscriptions, eq(sessions.subscriptionId, subscriptions.id))
+      .leftJoin(courses, eq(subscriptions.courseId, courses.id))
+      .where(
+        and(
+          eq(sessions.tutorId, tutorId),
+          or(
+            lt(sessions.scheduledAt, now),
+            eq(sessions.status, 'completed'),
+            eq(sessions.status, 'cancelled'),
+            eq(sessions.status, 'no_show')
+          )
+        )
+      )
+      .orderBy(desc(sessions.scheduledAt))
+      .limit(limit)
+      .offset(offset);
+
+    return results;
+  } catch (error) {
+    console.error("[Database] Failed to fetch past sessions:", error);
+    return [];
+  }
+}

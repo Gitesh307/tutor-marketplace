@@ -1,0 +1,1 @@
+ALTER TABLE `subscriptions` ADD `paymentStatus` enum('paid','pending','failed') DEFAULT 'pending' NOT NULL;

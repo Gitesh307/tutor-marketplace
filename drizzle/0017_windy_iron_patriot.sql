@@ -1,0 +1,1 @@
+ALTER TABLE `sessions` ADD `managementToken` varchar(64);

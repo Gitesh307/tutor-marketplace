@@ -1,0 +1,160 @@
+import React from "react";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { getLoginUrl } from "@/const";
+import { Button } from "@/components/ui/button";
+import { Link, useLocation } from "wouter";
+import { GraduationCap, MessageSquare, LayoutDashboard, LogOut, Play } from "lucide-react";
+import { trpc } from "@/lib/trpc";
+import VideoModal from "@/components/VideoModal";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+
+export default function Navigation() {
+  const { user, isAuthenticated, loading } = useAuth();
+  const [location] = useLocation();
+  const [isVideoModalOpen, setIsVideoModalOpen] = React.useState(false);
+  const logoutMutation = trpc.auth.logout.useMutation();
+
+  const handleLogout = async () => {
+    await logoutMutation.mutateAsync();
+    window.location.href = "/";
+  };
+
+  const getDashboardLink = () => {
+    if (user?.role === "admin") return "/admin/dashboard";
+    if (user?.role === "tutor") return "/tutor/dashboard";
+    if (user?.role === "parent") return "/parent/dashboard";
+    return "/"; // Default to home if no role assigned
+  };
+
+  const getInitials = (name?: string | null) => {
+    if (!name) return "U";
+    return name.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2);
+  };
+
+  return (
+    <nav className="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-50">
+      <div className="container mx-auto">
+        <div className="flex items-center justify-between h-16">
+          {/* Logo */}
+          <Link href="/" className="flex items-center gap-2 text-xl font-semibold text-primary hover:text-primary/80 transition-colors">
+            <GraduationCap className="w-8 h-8" />
+            <span>EdKonnect Academy</span>
+          </Link>
+
+          {/* Navigation Links */}
+          <div className="hidden md:flex items-center gap-6">
+            <Link href="/tutors" className={`text-sm font-medium transition-colors hover:text-primary ${
+              location === "/tutors" ? "text-primary" : "text-muted-foreground"
+            }`}>
+              Find Tutors
+            </Link>
+            
+            <Link href="/courses" className={`text-sm font-medium transition-colors hover:text-primary ${
+              location === "/courses" ? "text-primary" : "text-muted-foreground"
+            }`}>
+              Browse Courses
+            </Link>
+            
+            <Link href="/tutor-registration" className={`text-sm font-medium transition-colors hover:text-primary ${
+              location === "/tutor-registration" ? "text-primary" : "text-muted-foreground"
+            }`}>
+              Become a Tutor
+            </Link>
+            
+            <button
+              onClick={() => setIsVideoModalOpen(true)}
+              className="flex items-center gap-2 text-sm font-medium transition-colors hover:text-primary text-muted-foreground"
+            >
+              <Play className="w-4 h-4" />
+              What's EdKonnect
+            </button>
+            
+            {isAuthenticated && (
+              <>
+                <Link href={getDashboardLink()} className={`flex items-center gap-2 text-sm font-medium transition-colors hover:text-primary ${
+                  location.includes("/dashboard") ? "text-primary" : "text-muted-foreground"
+                }`}>
+                  <LayoutDashboard className="w-4 h-4" />
+                  Dashboard
+                </Link>
+                
+                <Link href="/messages" className={`flex items-center gap-2 text-sm font-medium transition-colors hover:text-primary ${
+                  location === "/messages" ? "text-primary" : "text-muted-foreground"
+                }`}>
+                  <MessageSquare className="w-4 h-4" />
+                  Messages
+                </Link>
+              </>
+            )}
+          </div>
+
+          {/* Auth Section */}
+          <div className="flex items-center gap-4">
+            {loading ? (
+              <div className="w-8 h-8 rounded-full bg-muted animate-pulse" />
+            ) : isAuthenticated && user ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" className="relative h-10 w-10 rounded-full">
+                    <Avatar>
+                      <AvatarFallback className="bg-primary text-primary-foreground">
+                        {getInitials(user.name)}
+                      </AvatarFallback>
+                    </Avatar>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56">
+                  <div className="flex flex-col space-y-1 p-2">
+                    <p className="text-sm font-medium">{user.name || "User"}</p>
+                    <p className="text-xs text-muted-foreground">{user.email}</p>
+                    <p className="text-xs text-muted-foreground capitalize">
+                      {user.role} Account
+                    </p>
+                  </div>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem asChild>
+                    <Link href={getDashboardLink()} className="flex items-center w-full cursor-pointer">
+                      <LayoutDashboard className="w-4 h-4 mr-2" />
+                      Dashboard
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem asChild>
+                    <Link href="/messages" className="flex items-center w-full cursor-pointer">
+                      <MessageSquare className="w-4 h-4 mr-2" />
+                      Messages
+                    </Link>
+                  </DropdownMenuItem>
+                  {user.role === 'admin' && (
+                    <DropdownMenuItem asChild>
+                      <Link href="/admin/dashboard" className="flex items-center w-full cursor-pointer">
+                        <LayoutDashboard className="w-4 h-4 mr-2" />
+                        Admin Panel
+                      </Link>
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={handleLogout} className="cursor-pointer">
+                    <LogOut className="w-4 h-4 mr-2" />
+                    Log out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <Button asChild>
+                <a href={getLoginUrl()}>Sign In</a>
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+      <VideoModal open={isVideoModalOpen} onOpenChange={setIsVideoModalOpen} />
+    </nav>
+  );
+}
