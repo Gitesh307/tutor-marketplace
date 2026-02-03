@@ -1,6 +1,6 @@
 import React from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
+import { LOGIN_PATH } from "@/const";
 import { Button } from "@/components/ui/button";
 import { Link, useLocation } from "wouter";
 import { GraduationCap, MessageSquare, LayoutDashboard, LogOut, Play } from "lucide-react";
@@ -148,7 +148,7 @@ export default function Navigation() {
               </DropdownMenu>
             ) : (
               <Button asChild>
-                <a href={getLoginUrl()}>Sign In</a>
+                <a href={LOGIN_PATH}>Sign In</a>
               </Button>
             )}
           </div>

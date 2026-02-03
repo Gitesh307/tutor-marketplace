@@ -16,7 +16,7 @@ import { AvailabilityManager } from "@/components/AvailabilityManager";
 import { TimeBlockManager } from "@/components/TimeBlockManager";
 import { VideoUploadManager } from "@/components/VideoUploadManager";
 import { useEffect, useState } from "react";
-import { getLoginUrl } from "@/const";
+import { LOGIN_PATH } from "@/const";
 import { toast } from "sonner";
 
 export default function TutorDashboard() {
@@ -54,7 +54,7 @@ export default function TutorDashboard() {
 
   useEffect(() => {
     if (!loading && !isAuthenticated) {
-      window.location.href = getLoginUrl();
+      window.location.href = LOGIN_PATH;
     }
     if (!loading && user?.role !== "tutor" && user?.role !== "admin") {
       setLocation("/"); // Redirect to home if not a tutor

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useLocation } from "wouter";
+import { useLocation, Link } from "wouter";
 import Navigation from "@/components/Navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,15 +8,19 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { GraduationCap } from "lucide-react";
+import { useAuth } from "@/_core/hooks/useAuth";
 
 export default function SignUp() {
   const [, setLocation] = useLocation();
+  const { signup } = useAuth();
   const [formData, setFormData] = useState({
     firstName: "",
     lastName: "",
     email: "",
+    password: "",
     phone: "",
     educationalNeeds: "",
+    role: "parent" as "parent" | "tutor" | "admin",
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -31,7 +35,7 @@ export default function SignUp() {
     e.preventDefault();
     
     // Validation
-    if (!formData.firstName || !formData.lastName || !formData.email) {
+    if (!formData.firstName || !formData.lastName || !formData.email || !formData.password) {
       toast.error("Please fill in all required fields");
       return;
     }
@@ -46,13 +50,15 @@ export default function SignUp() {
     setIsSubmitting(true);
 
     try {
-      // For now, just show success message and redirect
-      // In a real app, this would send data to the backend
-      toast.success("Thank you for signing up! Redirecting to role selection...");
-      
-      setTimeout(() => {
-        setLocation("/role-selection");
-      }, 2000);
+      await signup({
+        firstName: formData.firstName,
+        lastName: formData.lastName,
+        email: formData.email,
+        password: formData.password,
+        role: formData.role,
+      });
+      toast.success("Account created! Redirecting to dashboard...");
+      setLocation("/parent/dashboard");
     } catch (error) {
       toast.error("Something went wrong. Please try again.");
       setIsSubmitting(false);
@@ -130,6 +136,21 @@ export default function SignUp() {
                 </div>
 
                 <div className="space-y-2">
+                  <Label htmlFor="password">
+                    Password <span className="text-destructive">*</span>
+                  </Label>
+                  <Input
+                    id="password"
+                    name="password"
+                    type="password"
+                    value={formData.password}
+                    onChange={handleChange}
+                    placeholder="••••••••"
+                    required
+                  />
+                </div>
+
+                <div className="space-y-2">
                   <Label htmlFor="phone">Phone Number</Label>
                   <Input
                     id="phone"
@@ -174,6 +195,10 @@ export default function SignUp() {
                   <a href="#" className="text-primary hover:underline">
                     Privacy Policy
                   </a>
+                  . Already have an account?{" "}
+                  <Link href="/login" className="text-primary hover:underline">
+                    Sign in
+                  </Link>
                 </p>
               </form>
             </CardContent>

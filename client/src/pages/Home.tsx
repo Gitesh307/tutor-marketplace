@@ -1,6 +1,5 @@
 import React from "react";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
@@ -509,7 +508,7 @@ export default function Home() {
                 {[...blogPostsData, ...blogPostsData].map((post, idx) => (
                   <Card
                     key={`${post.id}-${idx}`}
-                    className="overflow-hidden hover:shadow-lg transition-shadow group min-w-[280px] md:min-w-[320px] lg:min-w-[360px]"
+                    className="overflow-hidden hover:shadow-lg transition-shadow group min-w-[260px] md:min-w-[300px] lg:min-w-[320px] max-w-[320px]"
                   >
                     {post.coverImageUrl && (
                       <div className="h-48 overflow-hidden">

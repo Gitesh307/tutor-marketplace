@@ -13,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useParams, Link, useLocation } from "wouter";
 import { Clock, DollarSign, BookOpen, Calendar, Users, Download } from "lucide-react";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
+import { LOGIN_PATH } from "@/const";
 import { toast } from "sonner";
 import { BookableCalendar } from "@/components/BookableCalendar";
 
@@ -72,7 +72,7 @@ export default function CourseDetail() {
 
   const handleEnrollClick = () => {
     if (!isAuthenticated) {
-      window.location.href = getLoginUrl();
+      window.location.href = LOGIN_PATH;
       return;
     }
 
@@ -528,7 +528,7 @@ export default function CourseDetail() {
                   ) : (
                     <>
                       <Button asChild className="w-full" size="lg">
-                        <a href={getLoginUrl()}>Sign In to Enroll</a>
+                        <a href={LOGIN_PATH}>Sign In to Enroll</a>
                       </Button>
                       <p className="text-xs text-center text-muted-foreground">
                         Create a free account to get started

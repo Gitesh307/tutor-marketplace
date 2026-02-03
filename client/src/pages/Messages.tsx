@@ -11,7 +11,7 @@ import { MessageSquare, Send, User, GraduationCap, ChevronRight, Paperclip, X, F
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { useLocation } from "wouter";
-import { getLoginUrl } from "@/const";
+import { LOGIN_PATH } from "@/const";
 
 export default function Messages() {
   const { user, isAuthenticated, loading } = useAuth();
@@ -40,7 +40,7 @@ export default function Messages() {
 
   useEffect(() => {
     if (!loading && !isAuthenticated) {
-      window.location.href = getLoginUrl();
+      window.location.href = LOGIN_PATH;
     }
   }, [loading, isAuthenticated]);
 

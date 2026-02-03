@@ -11,7 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Link, useLocation } from "wouter";
 import { BookOpen, Calendar, MessageSquare, CreditCard, Clock, Users } from "lucide-react";
 import { useEffect } from "react";
-import { getLoginUrl } from "@/const";
+import { LOGIN_PATH } from "@/const";
 import { SessionNotesFeed } from "@/components/SessionNotesFeed";
 import { PaymentHistoryTable } from "@/components/PaymentHistoryTable";
 import { NotificationSettings } from "@/components/NotificationSettings";
@@ -54,7 +54,7 @@ export default function ParentDashboard() {
 
   useEffect(() => {
     if (!loading && !isAuthenticated) {
-      window.location.href = getLoginUrl();
+      window.location.href = LOGIN_PATH;
     }
     if (!loading && user?.role !== "parent" && user?.role !== "admin") {
       setLocation("/role-selection");

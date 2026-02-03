@@ -7,7 +7,7 @@ import { SessionNotesView } from "@/components/SessionNotesView";
 import { FileText, Calendar } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useEffect } from "react";
-import { getLoginUrl } from "@/const";
+import { LOGIN_PATH } from "@/const";
 
 export default function SessionNotesHistory() {
   const { user, isAuthenticated, loading } = useAuth();
@@ -25,7 +25,7 @@ export default function SessionNotesHistory() {
 
   useEffect(() => {
     if (!loading && !isAuthenticated) {
-      window.location.href = getLoginUrl();
+      window.location.href = LOGIN_PATH;
     }
   }, [loading, isAuthenticated]);
 

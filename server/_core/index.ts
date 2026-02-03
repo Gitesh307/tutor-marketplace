@@ -2,11 +2,17 @@ import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
 import net from "net";
+import cors from "cors";
+import helmet from "helmet";
+import cookieParser from "cookie-parser";
+import rateLimit from "express-rate-limit";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { registerOAuthRoutes } from "./oauth";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+import { ENV } from "./env";
+import { authRouter } from "./routes/auth";
+import { userRouter } from "./routes/users";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -30,6 +36,29 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 async function startServer() {
   const app = express();
   const server = createServer(app);
+
+  // Security & middleware
+  app.use(helmet());
+  if (process.env.NODE_ENV === "development") {
+    // TEMP: Loosen CSP in dev to satisfy Brave Shields / Vite HMR inline preamble.
+    // Remove before production.
+    app.use((_, res, next) => {
+      res.setHeader("Content-Security-Policy", "script-src 'self' 'unsafe-inline' 'unsafe-eval'");
+      next();
+    });
+  }
+  app.use(
+    cors({
+      origin: ENV.corsOrigin,
+      credentials: true,
+    })
+  );
+  app.use(cookieParser());
+
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 100,
+  });
   
   // Stripe webhook MUST be registered before express.json() for signature verification
   const { handleStripeWebhook } = await import("../stripeWebhook");
@@ -42,8 +71,10 @@ async function startServer() {
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
-  // OAuth callback under /api/oauth/callback
-  registerOAuthRoutes(app);
+
+  // Auth routes
+  app.use("/api/auth", authLimiter, authRouter);
+  app.use("/api/users", userRouter);
   
   // PDF download route
   const { pdfRouter } = await import("../pdfRoute");

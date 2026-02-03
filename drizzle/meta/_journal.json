@@ -190,6 +190,13 @@
       "when": 1769295381844,
       "tag": "0026_gigantic_whistler",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "5",
+      "when": 1770086764067,
+      "tag": "0027_lean_pride",
+      "breakpoints": true
     }
   ]
 }

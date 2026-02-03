@@ -8,16 +8,20 @@ import { useParams, Link } from "wouter";
 import { Star, BookOpen, Clock, DollarSign, MessageSquare } from "lucide-react";
 import { VideoPlayerWithRecommendations } from "@/components/VideoPlayerWithRecommendations";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
+import { LOGIN_PATH } from "@/const";
 import AvailabilityCalendar from "@/components/AvailabilityCalendar";
 import TutorAvailabilityDisplay from "@/components/TutorAvailabilityDisplay";
 
 export default function TutorDetail() {
   const { id } = useParams();
-  const tutorId = parseInt(id || "0");
+  const tutorId = Number(id);
+  const hasValidId = Number.isFinite(tutorId) && tutorId > 0;
   const { user, isAuthenticated } = useAuth();
 
-  const { data: tutorProfile, isLoading: profileLoading } = trpc.tutorProfile.get.useQuery({ userId: tutorId });
+  const { data: tutorProfile, isLoading: profileLoading } = trpc.tutorProfile.get.useQuery(
+    { userId: tutorId },
+    { enabled: hasValidId }
+  );
   const { isLoading: coursesLoading } = trpc.course.myCoursesAsTutor.useQuery(undefined, {
     enabled: false, // We'll fetch via a different approach
   });
@@ -30,7 +34,7 @@ export default function TutorDetail() {
   
   // Fetch courses by tutor ID using the tutorProfile router
   const { data: coursesData } = trpc.tutorProfile.getCourses.useQuery({ tutorId }, {
-    enabled: !!tutorId,
+    enabled: hasValidId,
   });
   
   const displayCourses = coursesData || [];
@@ -52,6 +56,20 @@ export default function TutorDetail() {
       return [];
     }
   };
+
+  if (!hasValidId) {
+    return (
+      <div className="min-h-screen flex flex-col bg-background">
+        <Navigation />
+        <div className="container py-12 text-center">
+          <h1 className="text-2xl font-bold mb-4">Tutor Not Found</h1>
+          <Button asChild>
+            <Link href="/tutors">Back to Tutors</Link>
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   if (profileLoading) {
     return (
@@ -157,7 +175,7 @@ export default function TutorDetail() {
                 )}
                 {!isAuthenticated && (
                   <Button asChild size="lg">
-                    <a href={getLoginUrl()}>Sign In to Contact</a>
+                    <a href={LOGIN_PATH}>Sign In to Contact</a>
                   </Button>
                 )}
               </div>

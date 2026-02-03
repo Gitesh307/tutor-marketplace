@@ -1,5 +1,6 @@
 import { eq, and, or, like, desc, asc, sql, gte, lte, lt, gt, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
+import crypto from "crypto";
 import { 
   InsertUser, users, tutorProfiles, parentProfiles, courses, 
   subscriptions, sessions, conversations, messages, payments,
@@ -16,7 +17,8 @@ import {
   tutorReviews, InsertTutorReview,
   notificationPreferences, InsertNotificationPreference,
   notificationLogs, InsertNotificationLog,
-  inAppNotifications, InsertInAppNotification
+  inAppNotifications, InsertInAppNotification,
+  refreshTokens
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -36,65 +38,48 @@ export async function getDb() {
 
 // ============ User Management ============
 
-export async function upsertUser(user: InsertUser): Promise<void> {
-  if (!user.openId) {
-    throw new Error("User openId is required for upsert");
-  }
+function generateOpenId() {
+  return crypto.randomUUID();
+}
 
+export async function createAuthUser(input: {
+  email: string;
+  passwordHash: string;
+  firstName: string;
+  lastName: string;
+  role: "parent" | "tutor" | "admin";
+  userType?: "parent" | "tutor" | "admin";
+}) {
   const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot upsert user: database not available");
-    return;
-  }
+  if (!db) return null;
 
-  try {
-    const values: InsertUser = {
-      openId: user.openId,
-    };
-    const updateSet: Record<string, unknown> = {};
+  const now = new Date();
+  const openId = generateOpenId();
 
-    const textFields = ["name", "email", "loginMethod"] as const;
-    type TextField = (typeof textFields)[number];
+  const inserted = await db.insert(users).values({
+    openId,
+    email: input.email,
+    passwordHash: input.passwordHash,
+    firstName: input.firstName,
+    lastName: input.lastName,
+    name: `${input.firstName} ${input.lastName}`.trim(),
+    role: input.role,
+    userType: input.userType ?? input.role,
+    lastSignedIn: now,
+    createdAt: now,
+    updatedAt: now,
+  } as InsertUser);
 
-    const assignNullable = (field: TextField) => {
-      const value = user[field];
-      if (value === undefined) return;
-      const normalized = value ?? null;
-      values[field] = normalized;
-      updateSet[field] = normalized;
-    };
+  // With mysql2 driver drizzle doesn't reliably expose insertId; fetch by email instead
+  const created = await getUserByEmail(input.email);
+  return created ?? null;
+}
 
-    textFields.forEach(assignNullable);
-
-    if (user.lastSignedIn !== undefined) {
-      values.lastSignedIn = user.lastSignedIn;
-      updateSet.lastSignedIn = user.lastSignedIn;
-    }
-    if (user.role !== undefined) {
-      values.role = user.role;
-      updateSet.role = user.role;
-    } else if (user.openId === ENV.ownerOpenId) {
-      values.role = 'admin';
-      updateSet.role = 'admin';
-    } else {
-      values.role = 'parent'; // Default role
-    }
-
-    if (!values.lastSignedIn) {
-      values.lastSignedIn = new Date();
-    }
-
-    if (Object.keys(updateSet).length === 0) {
-      updateSet.lastSignedIn = new Date();
-    }
-
-    await db.insert(users).values(values).onDuplicateKeyUpdate({
-      set: updateSet,
-    });
-  } catch (error) {
-    console.error("[Database] Failed to upsert user:", error);
-    throw error;
-  }
+export async function getUserByEmail(email: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(users).where(eq(users.email, email)).limit(1);
+  return result[0];
 }
 
 export async function getUserByOpenId(openId: string) {
@@ -114,6 +99,45 @@ export async function getUserById(id: number) {
 
   const result = await db.select().from(users).where(eq(users.id, id)).limit(1);
   return result.length > 0 ? result[0] : undefined;
+}
+
+// ============ Refresh Token Management ============
+
+function hashToken(token: string) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+export async function storeRefreshToken(userId: number, token: string, expiresAt: Date) {
+  const db = await getDb();
+  if (!db) return;
+  const tokenHash = hashToken(token);
+  await db.insert(refreshTokens).values({ userId, tokenHash, expiresAt });
+}
+
+export async function revokeRefreshToken(token: string) {
+  const db = await getDb();
+  if (!db) return;
+  const tokenHash = hashToken(token);
+  await db.update(refreshTokens).set({ revokedAt: new Date() }).where(eq(refreshTokens.tokenHash, tokenHash));
+}
+
+export async function findValidRefreshToken(token: string) {
+  const db = await getDb();
+  if (!db) return null;
+  const tokenHash = hashToken(token);
+  const now = new Date();
+  const results = await db
+    .select()
+    .from(refreshTokens)
+    .where(
+      and(
+        eq(refreshTokens.tokenHash, tokenHash),
+        sql`( ${refreshTokens.expiresAt} > ${now} )`,
+        sql`( ${refreshTokens.revokedAt} IS NULL )`
+      )
+    )
+    .limit(1);
+  return results[0] ?? null;
 }
 
 export async function getAllUsers() {
@@ -144,10 +168,15 @@ export async function createUser(user: { name: string; email: string; role: stri
 
   try {
     const result = await db.insert(users).values({
+      openId: crypto.randomUUID(),
       name: user.name,
       email: user.email,
+      firstName: user.name.split(" ")[0] || user.name,
+      lastName: user.name.split(" ").slice(1).join(" ") || user.name,
+      passwordHash: "$2a$12$C8WlA9kZZgwyU0YzUKGwEuKXXSb9VjA36TObgGJE0E7E5Wdl66iRS", // 'password' placeholder
       role: user.role as 'admin' | 'tutor' | 'parent',
-      openId: `temp_${Date.now()}_${Math.random().toString(36).substring(7)}`, // Temporary openId
+      userType: user.role as 'admin' | 'tutor' | 'parent',
+      lastSignedIn: new Date(),
     }) as any;
     return Number(result.insertId);
   } catch (error) {
@@ -484,16 +513,21 @@ export async function getTutorsForCourse(courseId: number) {
   const db = await getDb();
   if (!db) return [];
 
-  return await db.select({
-    tutorId: courseTutors.tutorId,
-    isPrimary: courseTutors.isPrimary,
-    user: users,
-    profile: tutorProfiles,
-  })
-    .from(courseTutors)
-    .innerJoin(users, eq(courseTutors.tutorId, users.id))
-    .leftJoin(tutorProfiles, eq(users.id, tutorProfiles.userId))
-    .where(eq(courseTutors.courseId, courseId));
+  try {
+    return await db.select({
+      tutorId: courseTutors.tutorId,
+      isPrimary: courseTutors.isPrimary,
+      user: users,
+      profile: tutorProfiles,
+    })
+      .from(courseTutors)
+      .innerJoin(users, eq(courseTutors.tutorId, users.id))
+      .leftJoin(tutorProfiles, eq(users.id, tutorProfiles.userId))
+      .where(eq(courseTutors.courseId, courseId));
+  } catch (error) {
+    console.error("[Database] getTutorsForCourse failed:", error);
+    return [];
+  }
 }
 
 export async function getCoursesByTutorId(tutorId: number) {

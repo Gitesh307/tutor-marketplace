@@ -10,7 +10,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertCircle, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Link } from "wouter";
-import { getLoginUrl } from "@/const";
+import { LOGIN_PATH } from "@/const";
 
 export default function BookSession() {
   const { id } = useParams();
@@ -25,7 +25,7 @@ export default function BookSession() {
 
   useEffect(() => {
     if (!loading && !isAuthenticated) {
-      window.location.href = getLoginUrl();
+      window.location.href = LOGIN_PATH;
     }
     if (!loading && user?.role !== "parent" && user?.role !== "admin") {
       setLocation("/role-selection");

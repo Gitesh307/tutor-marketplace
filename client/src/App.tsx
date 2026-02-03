@@ -15,6 +15,7 @@ import { AdminDashboard } from "./pages/AdminDashboard";
 import Messages from "./pages/Messages";
 // RoleSelection removed - users get role assigned during registration
 import SignUp from "./pages/SignUp";
+import Login from "./pages/Login";
 import BookSession from "./pages/BookSession";
 import { ManageBooking } from "./pages/ManageBooking";
 import SessionNotesHistory from "./pages/SessionNotesHistory";
@@ -26,17 +27,19 @@ function Router() {
   return (
     <Switch>
       <Route path={"/"} component={Home} />
-      <Route path={"signup"} component={SignUp} />
+      <Route path={"/signup"} component={SignUp} />
+      <Route path={"/login"} component={Login} />
       {/* RoleSelection removed - users get role assigned during registration */}
       <Route path={"/tutors"} component={TutorListing} />
       <Route path={"/find-tutors"} component={FindTutors} />
       <Route path={"/tutor-registration"} component={TutorRegistration} />
-      <Route path={"/tutor/:id"} component={TutorDetail} />
+      {/* Put specific tutor routes before the dynamic :id route to avoid collisions (e.g., /tutor/dashboard) */}
+      <Route path={"/tutor/dashboard"} component={TutorDashboard} />
       <Route path={"/tutor-profile/:id"} component={TutorProfile} />
+      <Route path={"/tutor/:id"} component={TutorDetail} />
       <Route path={"/courses"} component={CourseListing} />
       <Route path={"/course/:id"} component={CourseDetail} />
       <Route path={"/parent/dashboard"} component={ParentDashboard} />
-      <Route path={"/tutor/dashboard"} component={TutorDashboard} />
       <Route path={"/admin/dashboard"} component={AdminDashboard} />
       <Route path={"/book-session/:id"} component={BookSession} />
       <Route path={"/manage-booking/:token"} component={ManageBooking} />

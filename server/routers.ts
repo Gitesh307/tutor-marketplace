@@ -1,5 +1,4 @@
-import { COOKIE_NAME } from "@shared/const";
-import { getSessionCookieOptions } from "./_core/cookies";
+import { clearAuthCookies } from "./_core/services/authService";
 import { systemRouter } from "./_core/systemRouter";
 import { notifyOwner } from "./_core/notification";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
@@ -43,10 +42,14 @@ export const appRouter = router({
   system: systemRouter,
   
   auth: router({
-    me: publicProcedure.query(opts => opts.ctx.user),
+    me: publicProcedure.query(opts => {
+      const user = opts.ctx.user;
+      if (!user) return null;
+      const { passwordHash, ...rest } = user as any;
+      return rest;
+    }),
     logout: publicProcedure.mutation(({ ctx }) => {
-      const cookieOptions = getSessionCookieOptions(ctx.req);
-      ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
+      clearAuthCookies(ctx.req as any, ctx.res as any);
       return { success: true } as const;
     }),
     updateRole: protectedProcedure
@@ -2468,15 +2471,22 @@ export const appRouter = router({
       }),
 
     approveTutor: adminProcedure
-      .input(z.object({ tutorId: z.number() }))
+      .input(z.object({
+        profileId: z.number().optional(),
+        tutorId: z.number().optional(), // legacy name from UI
+      }))
       .mutation(async ({ input }) => {
+        const profileId = input.profileId ?? input.tutorId;
+        if (!profileId) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'Missing profileId' });
+        }
         // Get tutor profile details before approval
-        const tutorProfile = await db.getTutorProfileByUserId(input.tutorId);
+        const tutorProfile = await db.getTutorProfileById(profileId);
         if (!tutorProfile) {
           throw new TRPCError({ code: 'NOT_FOUND', message: 'Tutor profile not found' });
         }
 
-        const success = await db.approveTutorProfile(input.tutorId);
+        const success = await db.approveTutorProfile(profileId);
         if (!success) {
           throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to approve tutor' });
         }
@@ -2511,17 +2521,22 @@ export const appRouter = router({
 
     rejectTutor: adminProcedure
       .input(z.object({
-        tutorId: z.number(),
+        profileId: z.number().optional(),
+        tutorId: z.number().optional(), // legacy name from UI
         reason: z.string(),
       }))
       .mutation(async ({ input }) => {
+        const profileId = input.profileId ?? input.tutorId;
+        if (!profileId) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'Missing profileId' });
+        }
         // Get tutor profile details before rejection
-        const tutorProfile = await db.getTutorProfileByUserId(input.tutorId);
+        const tutorProfile = await db.getTutorProfileById(profileId);
         if (!tutorProfile) {
           throw new TRPCError({ code: 'NOT_FOUND', message: 'Tutor profile not found' });
         }
 
-        const success = await db.rejectTutorProfile(input.tutorId, input.reason);
+        const success = await db.rejectTutorProfile(profileId, input.reason);
         if (!success) {
           throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to reject tutor' });
         }

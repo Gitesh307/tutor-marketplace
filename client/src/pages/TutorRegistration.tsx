@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { useLocation } from "wouter";
 import { CheckCircle2, Loader2 } from "lucide-react";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
+import { LOGIN_PATH } from "@/const";
 
 const SUBJECTS = [
   "Mathematics",
@@ -33,13 +33,6 @@ export default function TutorRegistration() {
   const { user, isAuthenticated, loading } = useAuth();
   const [, navigate] = useLocation();
   const [submitted, setSubmitted] = useState(false);
-
-  // Redirect to login if not authenticated
-  useEffect(() => {
-    if (!loading && !isAuthenticated) {
-      window.location.href = getLoginUrl();
-    }
-  }, [loading, isAuthenticated]);
 
   // Pre-fill form with user data
   useEffect(() => {
@@ -77,6 +70,12 @@ export default function TutorRegistration() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!isAuthenticated) {
+      toast.error("Please sign in to submit your tutor application.");
+      navigate(LOGIN_PATH);
+      return;
+    }
 
     // Validation
     if (!formData.name || !formData.email || !formData.bio || !formData.qualifications) {
