@@ -91,8 +91,7 @@ export default function CourseDetail() {
     }
 
     try {
-      // Create Stripe checkout session with student information
-      const { checkoutUrl } = await createCheckoutMutation.mutateAsync({
+      const result = await createCheckoutMutation.mutateAsync({
         courseId,
         preferredTutorId: selectedTutorId || undefined,
         studentFirstName,
@@ -100,10 +99,13 @@ export default function CourseDetail() {
         studentGrade: studentGrade || "Not specified",
       });
 
-      if (checkoutUrl) {
-        setIsEnrollDialogOpen(false);
-        toast.success("Redirecting to payment...");
-        window.open(checkoutUrl, "_blank");
+      setIsEnrollDialogOpen(false);
+      if (result?.success) {
+        toast.success("Enrollment completed and payment marked as paid.");
+        setLocation("/parent/dashboard");
+      } else {
+        toast.success("Enrollment completed.");
+        setLocation("/parent/dashboard");
       }
     } catch (error) {
       toast.error("Failed to process enrollment");

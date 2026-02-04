@@ -13,6 +13,8 @@ import { generateCurriculumPDF } from "./pdf-generator";
 import { sendSessionNotesEmail } from "./session-notes-email";
 import { storagePut } from "./storage";
 import crypto from "crypto";
+import { and, eq } from "drizzle-orm";
+import { subscriptions as subscriptionsTable } from "../drizzle/schema";
 
 // Helper to check if user is a tutor
 const tutorProcedure = protectedProcedure.use(({ ctx, next }) => {
@@ -544,9 +546,6 @@ export const appRouter = router({
         studentGrade: z.string(),
       }))
       .mutation(async ({ ctx, input }) => {
-        const { default: Stripe } = await import('stripe');
-        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2025-12-15.clover' });
-
         // Get course details
         const course = await db.getCourseById(input.courseId);
         if (!course) {
@@ -560,43 +559,93 @@ export const appRouter = router({
           throw new TRPCError({ code: 'NOT_FOUND', message: 'No tutor found for this course' });
         }
 
-        // Create Stripe checkout session
-        const session = await stripe.checkout.sessions.create({
-          mode: 'payment',
-          payment_method_types: ['card'],
-          line_items: [
-            {
-              price_data: {
-                currency: 'usd',
-                product_data: {
-                  name: course.title,
-                  description: course.description || undefined,
-                  images: course.imageUrl ? [course.imageUrl] : undefined,
-                },
-                unit_amount: Math.round(parseFloat(course.price) * 100), // Convert to cents
-              },
-              quantity: 1,
-            },
-          ],
-          success_url: `${ctx.req.headers.origin}/dashboard?payment=success`,
-          cancel_url: `${ctx.req.headers.origin}/courses/${input.courseId}?payment=cancelled`,
-          customer_email: ctx.user.email || undefined,
-          client_reference_id: ctx.user.id.toString(),
-          metadata: {
-            userId: ctx.user.id.toString(),
-            courseId: input.courseId.toString(),
-            tutorId: primaryTutor.tutorId.toString(),
-            preferredTutorId: input.preferredTutorId?.toString() || '',
+        // Fast-path: mark as fully paid without external checkout
+        const now = new Date();
+        const endDate = new Date();
+        endDate.setMonth(endDate.getMonth() + 3); // retain original 3-month window
+
+        // Reuse existing subscription if one exists for this parent + course
+        const dbInstance = await db.getDb();
+        let subscriptionId: number | null = null;
+        if (dbInstance) {
+          const existing = await dbInstance
+            .select()
+            .from(subscriptionsTable)
+            .where(
+              and(
+                eq(subscriptionsTable.parentId, ctx.user.id),
+                eq(subscriptionsTable.courseId, input.courseId)
+              )
+            )
+            .limit(1);
+
+          if (existing[0]) {
+            subscriptionId = existing[0].id;
+            await db.updateSubscription(subscriptionId, {
+              preferredTutorId: input.preferredTutorId,
+              studentFirstName: input.studentFirstName,
+              studentLastName: input.studentLastName,
+              studentGrade: input.studentGrade,
+              status: "active",
+              startDate: now,
+              endDate,
+              paymentStatus: "paid",
+              paymentPlan: "full",
+              firstInstallmentPaid: true,
+              secondInstallmentPaid: true,
+            });
+          }
+        }
+
+        if (!subscriptionId) {
+          subscriptionId = await db.createSubscription({
+            parentId: ctx.user.id,
+            courseId: input.courseId,
+            preferredTutorId: input.preferredTutorId,
             studentFirstName: input.studentFirstName,
             studentLastName: input.studentLastName,
             studentGrade: input.studentGrade,
-            customerEmail: ctx.user.email || '',
-            customerName: ctx.user.name || '',
-          },
-          allow_promotion_codes: true,
+            status: "active",
+            startDate: now,
+            endDate,
+            paymentStatus: "paid",
+            paymentPlan: "full",
+            firstInstallmentPaid: true,
+            secondInstallmentPaid: true,
+          });
+        }
+
+        if (!subscriptionId) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create enrollment" });
+        }
+
+        // Record payment as completed
+        await db.createPayment({
+          parentId: ctx.user.id,
+          tutorId: primaryTutor.tutorId,
+          subscriptionId,
+          sessionId: null,
+          amount: course.price,
+          currency: "usd",
+          status: "completed",
+          stripePaymentIntentId: null,
+          paymentType: "subscription",
         });
 
-        return { checkoutUrl: session.url };
+        // Send confirmation email (non-blocking)
+        if (ctx.user.email && ctx.user.name) {
+          const tutorNames = tutors.map(t => t.user.name).filter(Boolean) as string[];
+          sendEnrollmentConfirmation({
+            userEmail: ctx.user.email,
+            userName: ctx.user.name,
+            courseName: course.title,
+            tutorNames: tutorNames.length > 0 ? tutorNames : ['Your tutor'],
+            coursePrice: formatEmailPrice(Math.round(parseFloat(course.price) * 100)),
+            courseId: course.id,
+          }).catch(err => console.error('[Email] Failed to send enrollment confirmation:', err));
+        }
+
+        return { success: true, subscriptionId };
       }),
 
     enrollWithoutPayment: parentProcedure
@@ -727,8 +776,57 @@ export const appRouter = router({
       return await db.getSubscriptionsByParentId(ctx.user.id);
     }),
 
+    getAvailability: parentProcedure
+      .input(z.object({
+        subscriptionId: z.number(),
+        windowDays: z.number().optional().default(42),
+      }))
+      .query(async ({ input }) => {
+        const subscription = await db.getSubscriptionById(input.subscriptionId);
+        if (!subscription) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Subscription not found' });
+        }
+
+        const primaryTutor = await db.getPrimaryTutorForCourse(subscription.courseId);
+        const tutorId = subscription.preferredTutorId || primaryTutor?.tutorId;
+        if (!tutorId) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Tutor not found for this subscription' });
+        }
+
+        const availability = await db.getTutorAvailability(tutorId);
+
+        const now = Date.now();
+        const windowEnd = now + input.windowDays * 24 * 60 * 60 * 1000;
+        const booked = await db.getTutorSessionsWithin(tutorId, now, windowEnd);
+
+        return {
+          tutorId,
+          availability,
+          booked,
+        };
+      }),
+
     mySubscriptionsAsTutor: tutorProcedure.query(async ({ ctx }) => {
-      return await db.getSubscriptionsByTutorId(ctx.user.id);
+      const subs = await db.getSubscriptionsByTutorId(ctx.user.id);
+
+      // Show only pay-later enrollments to avoid duplicates from failed/other payment attempts
+      const payLater = subs.filter(
+        (s) =>
+          s.subscription.paymentStatus === "pending" &&
+          (s.subscription.paymentPlan ?? "full") === "full"
+      );
+
+      // Deduplicate by parent+course (keep the latest)
+      const dedupedMap = new Map<string, typeof payLater[0]>();
+      for (const entry of payLater) {
+        const key = `${entry.subscription.parentId}-${entry.subscription.courseId}`;
+        const existing = dedupedMap.get(key);
+        if (!existing || (entry.subscription.createdAt ?? 0) > (existing.subscription.createdAt ?? 0)) {
+          dedupedMap.set(key, entry);
+        }
+      }
+
+      return Array.from(dedupedMap.values());
     }),
 
     create: parentProcedure
@@ -797,24 +895,44 @@ export const appRouter = router({
         }
 
         return session;
-      }),
+    }),
 
     myUpcoming: protectedProcedure.query(async ({ ctx }) => {
       const role = ctx.user.role === 'tutor' ? 'tutor' : 'parent';
-      return await db.getUpcomingSessions(ctx.user.id, role);
+      const rows = await db.getUpcomingSessions(ctx.user.id, role);
+      return rows.map((row: any) => ({
+        ...(row.session || row),
+        courseTitle: row.courseTitle,
+        tutorName: row.tutorName,
+      }));
     }),
 
     myHistory: protectedProcedure.query(async ({ ctx }) => {
       if (ctx.user.role === 'tutor') {
-        return await db.getSessionsByTutorId(ctx.user.id);
+        const rows = await db.getSessionsByTutorId(ctx.user.id);
+        return rows.map((row: any) => ({
+          ...(row.session || row),
+          courseTitle: row.courseTitle,
+          tutorName: row.tutorName,
+        }));
       } else {
-        return await db.getSessionsByParentId(ctx.user.id);
+        const rows = await db.getSessionsByParentId(ctx.user.id);
+        return rows.map((row: any) => ({
+          ...(row.session || row),
+          courseTitle: row.courseTitle,
+          tutorName: row.tutorName,
+        }));
       }
     }),
 
     myBookings: parentProcedure.query(async ({ ctx }) => {
       // Fetch all sessions for the parent grouped by subscription
-      const sessions = await db.getSessionsByParentId(ctx.user.id);
+      const rows = await db.getSessionsByParentId(ctx.user.id);
+      const sessions = rows.map((row: any) => ({
+        ...(row.session || row),
+        course: row.courseTitle ? { title: row.courseTitle } : null,
+        tutor: row.tutorName ? { name: row.tutorName } : null,
+      }));
       
       // Group sessions by subscriptionId
       const grouped = sessions.reduce((acc: any, session: any) => {
@@ -1159,6 +1277,24 @@ export const appRouter = router({
         // Verify authorization
         if (input.parentId !== ctx.user.id && input.tutorId !== ctx.user.id && ctx.user.role !== 'admin') {
           throw new TRPCError({ code: 'FORBIDDEN', message: 'Not authorized' });
+        }
+
+        const now = Date.now();
+        if (input.scheduledAt <= now) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'Cannot schedule a session in the past' });
+        }
+
+        // Prevent double-booking: check overlapping sessions for this tutor
+        const overlapWindowStart = input.scheduledAt - input.duration * 60000;
+        const overlapWindowEnd = input.scheduledAt + input.duration * 60000;
+        const tutorSessions = await db.getTutorSessionsWithin(input.tutorId, overlapWindowStart, overlapWindowEnd);
+        const hasOverlap = tutorSessions.some((s: any) => {
+          const existingStart = s.scheduledAt;
+          const existingEnd = s.scheduledAt + s.duration * 60000;
+          return input.scheduledAt < existingEnd && (input.scheduledAt + input.duration * 60000) > existingStart;
+        });
+        if (hasOverlap) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'Time slot is already booked' });
         }
 
         const id = await db.createSession(input);

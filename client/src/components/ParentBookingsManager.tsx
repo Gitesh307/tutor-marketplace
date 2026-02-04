@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -18,12 +18,18 @@ export function ParentBookingsManager() {
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
   const [cancelSeriesDialogOpen, setCancelSeriesDialogOpen] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null);
+  const [selectedSubscriptionId, setSelectedSubscriptionId] = useState<number | null>(null);
+  const [selectedSessionDuration, setSelectedSessionDuration] = useState<number>(60);
   const [newDate, setNewDate] = useState<Date | undefined>(undefined);
   const [newTime, setNewTime] = useState<string>("");
   const [cancelReason, setCancelReason] = useState<string>("");
   const [frequency, setFrequency] = useState<"weekly" | "biweekly">("weekly");
 
   const { data: bookings, isLoading, refetch } = trpc.session.myBookings.useQuery();
+  const { data: availabilityData } = trpc.subscription.getAvailability.useQuery(
+    { subscriptionId: selectedSubscriptionId ?? 0 },
+    { enabled: !!selectedSubscriptionId }
+  );
 
   const rescheduleMutation = trpc.session.reschedule.useMutation({
     onSuccess: () => {
@@ -71,6 +77,17 @@ export function ParentBookingsManager() {
 
   const handleRescheduleSession = (sessionId: number) => {
     setSelectedSessionId(sessionId);
+    // Find the session and its subscription to scope availability and duration
+    if (bookings) {
+      for (const [subId, sessionList] of Object.entries(bookings as Record<string, any[]>)) {
+        const found = sessionList.find((s) => s.id === sessionId);
+        if (found) {
+          setSelectedSubscriptionId(Number(subId));
+          setSelectedSessionDuration(found.duration || 60);
+          break;
+        }
+      }
+    }
     setNewDate(undefined);
     setNewTime("");
     setRescheduleDialogOpen(true);
@@ -78,6 +95,12 @@ export function ParentBookingsManager() {
 
   const handleRescheduleSeries = (subscriptionId: number) => {
     setSelectedSeries(subscriptionId);
+    setSelectedSubscriptionId(subscriptionId);
+    // Use first session duration in the series if available
+    const sessionList = bookings ? (bookings as Record<string, any[]>)[subscriptionId] : undefined;
+    if (sessionList && sessionList.length > 0) {
+      setSelectedSessionDuration(sessionList[0].duration || 60);
+    }
     setNewDate(undefined);
     setFrequency("weekly");
     setRescheduleSeriesDialogOpen(true);
@@ -159,25 +182,74 @@ export function ParentBookingsManager() {
     });
   };
 
-  const getStatusBadge = (status: string) => {
+  const getStatusBadge = (status?: string | null) => {
     const variants: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
       scheduled: "default",
       completed: "secondary",
       cancelled: "destructive",
       no_show: "outline",
     };
+    const safeStatus = status || "pending";
+    const label = safeStatus.charAt(0).toUpperCase() + safeStatus.slice(1);
 
     return (
-      <Badge variant={variants[status] || "outline"}>
-        {status.charAt(0).toUpperCase() + status.slice(1)}
+      <Badge variant={variants[safeStatus] || "outline"}>
+        {label}
       </Badge>
     );
   };
 
-  const timeSlots = Array.from({ length: 24 }, (_, i) => {
-    const hour = i.toString().padStart(2, "0");
-    return [`${hour}:00`, `${hour}:30`];
-  }).flat();
+  const availableTimeSlots = useMemo(() => {
+    if (!newDate || !availabilityData) return [];
+
+    const day = newDate.getDay(); // 0 Sunday
+    const windows = (availabilityData.availability || []).filter((w: any) => w.dayOfWeek === day);
+    if (!windows.length) return [];
+
+    const duration = selectedSessionDuration || 60;
+    const booked = (availabilityData.booked || []).filter((b: any) => b.id !== selectedSessionId);
+
+    const slots: string[] = [];
+    const minutesFromMidnight = (d: Date) => d.getHours() * 60 + d.getMinutes();
+    const formatSlot = (d: Date) =>
+      d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+
+    const now = Date.now();
+
+    windows.forEach((w: any) => {
+      const [sh, sm] = w.startTime.split(":").map(Number);
+      const [eh, em] = w.endTime.split(":").map(Number);
+      let cursor = sh * 60 + sm;
+      const end = eh * 60 + em;
+
+      while (cursor + duration <= end) {
+        const start = new Date(newDate);
+        start.setHours(Math.floor(cursor / 60), cursor % 60, 0, 0);
+        const startMs = start.getTime();
+        const endMs = startMs + duration * 60000;
+
+        // Skip slots in the past (today or earlier)
+        if (startMs <= now) {
+          cursor += 30;
+          continue;
+        }
+
+        const overlaps = booked.some((b: any) => {
+          const bs = b.scheduledAt;
+          const be = bs + b.duration * 60000;
+          return startMs < be && endMs > bs;
+        });
+
+        if (!overlaps) {
+          slots.push(formatSlot(start));
+        }
+
+        cursor += 30; // 30-minute step
+      }
+    });
+
+    return Array.from(new Set(slots));
+  }, [availabilityData, newDate, selectedSessionDuration, selectedSessionId]);
 
   if (isLoading) {
     return <div className="text-center py-8">Loading your bookings...</div>;
@@ -322,11 +394,17 @@ export function ParentBookingsManager() {
                   <SelectValue placeholder="Select time" />
                 </SelectTrigger>
                 <SelectContent className="max-h-[200px]">
-                  {timeSlots.map((time) => (
-                    <SelectItem key={time} value={time}>
-                      {time}
+                  {availableTimeSlots.length === 0 ? (
+                    <SelectItem value="none" disabled>
+                      {newDate ? "No available times for this day" : "Select a date first"}
                     </SelectItem>
-                  ))}
+                  ) : (
+                    availableTimeSlots.map((time) => (
+                      <SelectItem key={time} value={time}>
+                        {time}
+                      </SelectItem>
+                    ))
+                  )}
                 </SelectContent>
               </Select>
             </div>
@@ -335,7 +413,7 @@ export function ParentBookingsManager() {
             <Button variant="outline" onClick={() => setRescheduleDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={confirmReschedule} disabled={!newDate || !newTime}>
+            <Button onClick={confirmReschedule} disabled={!newDate || !newTime || availableTimeSlots.length === 0}>
               Confirm Reschedule
             </Button>
           </DialogFooter>

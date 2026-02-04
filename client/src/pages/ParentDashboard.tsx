@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Link, useLocation } from "wouter";
-import { BookOpen, Calendar, MessageSquare, CreditCard, Clock, Users } from "lucide-react";
+import { BookOpen, Calendar, MessageSquare, CreditCard, Clock, Users, Video } from "lucide-react";
 import { useEffect } from "react";
 import { LOGIN_PATH } from "@/const";
 import { SessionNotesFeed } from "@/components/SessionNotesFeed";
@@ -247,14 +247,17 @@ export default function ParentDashboard() {
                               className="w-full"
                               onClick={async () => {
                                 try {
-                                  const { checkoutUrl } = await trpc.course.createCheckoutSession.useMutation().mutateAsync({
+                                  const result = await trpc.course.createCheckoutSession.useMutation().mutateAsync({
                                     courseId: course.id,
                                     studentFirstName: subscription.studentFirstName || "",
                                     studentLastName: subscription.studentLastName || "",
                                     studentGrade: subscription.studentGrade || "",
                                   });
-                                  if (checkoutUrl) {
-                                    window.open(checkoutUrl, "_blank");
+                                  if (result?.success) {
+                                    toast.success("Payment recorded as paid.");
+                                    window.location.reload();
+                                  } else if ((result as any)?.checkoutUrl) {
+                                    window.open((result as any).checkoutUrl, "_blank");
                                   }
                                 } catch (error) {
                                   toast.error("Failed to create payment session");
@@ -387,9 +390,6 @@ export default function ParentDashboard() {
                                 subscriptionId={subscription.id}
                                 tutorId={tutor.id}
                                 parentId={user?.id || 0}
-                                onSessionCreated={() => {
-                                  toast.success("Session scheduled!");
-                                }}
                               />
                             </CardContent>
                           </Card>
@@ -425,23 +425,41 @@ export default function ParentDashboard() {
               ) : upcomingSessions && upcomingSessions.length > 0 ? (
                 <div className="space-y-4">
                   {upcomingSessions.map((session) => (
-                    <Card key={session.id}>
+                    <Card key={session.id} className="bg-muted/60">
                       <CardContent className="pt-6">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-4">
+                        <div className="flex justify-between items-start gap-4 mb-4">
+                          <div className="flex gap-4">
                             <div className="w-12 h-12 rounded-lg bg-primary/10 flex items-center justify-center">
                               <Calendar className="w-6 h-6 text-primary" />
                             </div>
                             <div>
-                              <p className="font-semibold">
-                                {new Date(session.scheduledAt).toLocaleDateString()}
+                              <p className="text-lg font-semibold leading-tight">
+                                {session.courseTitle || "Course"}
                               </p>
                               <p className="text-sm text-muted-foreground">
-                                {new Date(session.scheduledAt).toLocaleTimeString()} • {session.duration} minutes
+                                with {session.tutorName || "Tutor"}
                               </p>
                             </div>
                           </div>
-                          <Badge>{session.status}</Badge>
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <Video className="w-4 h-4" />
+                            <span>{session.meetingPlatform || "On Zoom"}</span>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="space-y-2">
+                            <p className="text-sm text-muted-foreground">Starting time</p>
+                            <p className="text-base font-medium">
+                              {new Date(session.scheduledAt).toLocaleDateString()} • {new Date(session.scheduledAt).toLocaleTimeString()} • {session.duration} minutes
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Badge>{session.status}</Badge>
+                            <Button onClick={() => console.log("Join meeting clicked")}>
+                              Join meeting
+                            </Button>
+                          </div>
                         </div>
                       </CardContent>
                     </Card>
@@ -474,23 +492,24 @@ export default function ParentDashboard() {
                     <Card key={session.id}>
                       <CardContent className="pt-6">
                         <div className="flex items-start justify-between">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-3 mb-2">
-                              <p className="font-semibold">
-                                {new Date(session.scheduledAt).toLocaleDateString()}
-                              </p>
-                              <Badge variant={session.status === "completed" ? "default" : "secondary"}>
-                                {session.status}
-                              </Badge>
-                            </div>
-                            <p className="text-sm text-muted-foreground mb-2">
-                              {session.duration} minutes
+                        <div className="flex-1">
+                          <div className="flex items-center gap-3 mb-2">
+                            <div className="text-sm text-muted-foreground">{session.courseTitle || "Course"}</div>
+                            <p className="font-semibold">
+                              {new Date(session.scheduledAt).toLocaleDateString()}
                             </p>
-                            {session.feedbackFromTutor && (
-                              <p className="text-sm text-muted-foreground">
-                                <span className="font-medium">Tutor feedback:</span> {session.feedbackFromTutor}
-                              </p>
-                            )}
+                            <Badge variant={session.status === "completed" ? "default" : "secondary"}>
+                              {session.status}
+                            </Badge>
+                          </div>
+                          <p className="text-sm text-muted-foreground mb-2">
+                            {session.duration} minutes • Tutor: {session.tutorName || "Tutor"}
+                          </p>
+                          {session.feedbackFromTutor && (
+                            <p className="text-sm text-muted-foreground">
+                              <span className="font-medium">Tutor feedback:</span> {session.feedbackFromTutor}
+                            </p>
+                          )}
                           </div>
                         </div>
                       </CardContent>

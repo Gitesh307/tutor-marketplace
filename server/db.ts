@@ -514,7 +514,7 @@ export async function getTutorsForCourse(courseId: number) {
   if (!db) return [];
 
   try {
-    return await db.select({
+    const rows = await db.select({
       tutorId: courseTutors.tutorId,
       isPrimary: courseTutors.isPrimary,
       user: users,
@@ -524,6 +524,21 @@ export async function getTutorsForCourse(courseId: number) {
       .innerJoin(users, eq(courseTutors.tutorId, users.id))
       .leftJoin(tutorProfiles, eq(users.id, tutorProfiles.userId))
       .where(eq(courseTutors.courseId, courseId));
+
+    // Deduplicate by tutorId (in case multiple primary flags or duplicate links exist)
+    const byTutor = new Map<number, typeof rows[number]>();
+    for (const row of rows) {
+      const existing = byTutor.get(row.tutorId);
+      if (!existing) {
+        byTutor.set(row.tutorId, row);
+        continue;
+      }
+      // Prefer primary version if present
+      if (row.isPrimary && !existing.isPrimary) {
+        byTutor.set(row.tutorId, row);
+      }
+    }
+    return Array.from(byTutor.values());
   } catch (error) {
     console.error("[Database] getTutorsForCourse failed:", error);
     return [];
@@ -707,7 +722,17 @@ export async function createSession(session: InsertSession) {
 
   try {
     const result = await db.insert(sessions).values(session) as any;
-    return Number(result.insertId);
+    const insertId = result?.[0]?.insertId ?? (result as any)?.insertId;
+
+    if (insertId) return Number(insertId);
+
+    // Fallback: fetch the most recent session (best-effort)
+    const fallback = await db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .orderBy(desc(sessions.id))
+      .limit(1);
+    return fallback[0]?.id ?? null;
   } catch (error) {
     console.error("[Database] Failed to create session:", error);
     return null;
@@ -726,14 +751,36 @@ export async function getSessionsByParentId(parentId: number) {
   const db = await getDb();
   if (!db) return [];
 
-  return await db.select().from(sessions).where(eq(sessions.parentId, parentId)).orderBy(desc(sessions.scheduledAt));
+  return await db
+    .select({
+      session: sessions,
+      courseTitle: courses.title,
+      tutorName: users.name,
+    })
+    .from(sessions)
+    .leftJoin(subscriptions, eq(sessions.subscriptionId, subscriptions.id))
+    .leftJoin(courses, eq(subscriptions.courseId, courses.id))
+    .leftJoin(users, eq(sessions.tutorId, users.id))
+    .where(eq(sessions.parentId, parentId))
+    .orderBy(desc(sessions.scheduledAt));
 }
 
 export async function getSessionsByTutorId(tutorId: number) {
   const db = await getDb();
   if (!db) return [];
 
-  return await db.select().from(sessions).where(eq(sessions.tutorId, tutorId)).orderBy(desc(sessions.scheduledAt));
+  return await db
+    .select({
+      session: sessions,
+      courseTitle: courses.title,
+      tutorName: users.name,
+    })
+    .from(sessions)
+    .leftJoin(subscriptions, eq(sessions.subscriptionId, subscriptions.id))
+    .leftJoin(courses, eq(subscriptions.courseId, courses.id))
+    .leftJoin(users, eq(sessions.tutorId, users.id))
+    .where(eq(sessions.tutorId, tutorId))
+    .orderBy(desc(sessions.scheduledAt));
 }
 
 export async function getUpcomingSessions(userId: number, role: "parent" | "tutor") {
@@ -746,8 +793,15 @@ export async function getUpcomingSessions(userId: number, role: "parent" | "tuto
     : eq(sessions.tutorId, userId);
 
   return await db
-    .select()
+    .select({
+      session: sessions,
+      courseTitle: courses.title,
+      tutorName: users.name,
+    })
     .from(sessions)
+    .leftJoin(subscriptions, eq(sessions.subscriptionId, subscriptions.id))
+    .leftJoin(courses, eq(subscriptions.courseId, courses.id))
+    .leftJoin(users, eq(sessions.tutorId, users.id))
     .where(and(condition, gte(sessions.scheduledAt, now), eq(sessions.status, "scheduled")))
     .orderBy(asc(sessions.scheduledAt));
 }
@@ -1200,6 +1254,46 @@ export async function getTutorAvailability(tutorId: number) {
     console.error("[Database] Error fetching tutor availability:", error);
     return [];
   }
+}
+
+/**
+ * Get the primary tutor link for a course
+ */
+export async function getPrimaryTutorForCourse(courseId: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db
+    .select()
+    .from(courseTutors)
+    .where(and(eq(courseTutors.courseId, courseId), eq(courseTutors.isPrimary, true)))
+    .limit(1);
+
+  return result.length ? result[0] : null;
+}
+
+/**
+ * Get tutor sessions in a time window (ms)
+ */
+export async function getTutorSessionsWithin(tutorId: number, from: number, to: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db
+    .select({
+      id: sessions.id,
+      scheduledAt: sessions.scheduledAt,
+      duration: sessions.duration,
+      status: sessions.status,
+    })
+    .from(sessions)
+    .where(
+      and(
+        eq(sessions.tutorId, tutorId),
+        gte(sessions.scheduledAt, from),
+        lte(sessions.scheduledAt, to)
+      )
+    );
 }
 
 /**

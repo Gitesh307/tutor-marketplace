@@ -15,7 +15,7 @@ import { BookOpen, Calendar, MessageSquare, DollarSign, Users, Plus, Edit, Clock
 import { AvailabilityManager } from "@/components/AvailabilityManager";
 import { TimeBlockManager } from "@/components/TimeBlockManager";
 import { VideoUploadManager } from "@/components/VideoUploadManager";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { LOGIN_PATH } from "@/const";
 import { toast } from "sonner";
 
@@ -105,6 +105,18 @@ export default function TutorDashboard() {
     }
   };
 
+  const activeSubscriptions = subscriptions?.filter(s => s.subscription.status === "active") || [];
+  const activeCourses = courses?.filter(c => c.isActive) || [];
+  const uniqueActiveStudents = useMemo(() => {
+    const keys = activeSubscriptions.map((s) => {
+      const first = (s.subscription.studentFirstName || "").trim().toLowerCase();
+      const last = (s.subscription.studentLastName || "").trim().toLowerCase();
+      // Fallback to parentId when student name is missing to avoid undercounting
+      return `${s.subscription.parentId}-${first}-${last}`;
+    });
+    return new Set(keys).size;
+  }, [activeSubscriptions]);
+
   if (loading || !isAuthenticated) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -112,9 +124,6 @@ export default function TutorDashboard() {
       </div>
     );
   }
-
-  const activeSubscriptions = subscriptions?.filter(s => s.subscription.status === "active") || [];
-  const activeCourses = courses?.filter(c => c.isActive) || [];
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
@@ -178,7 +187,7 @@ export default function TutorDashboard() {
                       <div className="w-10 h-10 rounded-lg bg-accent/10 flex items-center justify-center">
                         <Users className="w-5 h-5 text-accent" />
                       </div>
-                      <span className="text-3xl font-bold">{activeSubscriptions.length}</span>
+                      <span className="text-3xl font-bold">{uniqueActiveStudents}</span>
                     </div>
                   </CardContent>
                 </Card>
