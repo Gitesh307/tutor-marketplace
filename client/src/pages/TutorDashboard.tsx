@@ -23,6 +23,8 @@ export default function TutorDashboard() {
   const { user, isAuthenticated, loading } = useAuth();
   const [, setLocation] = useLocation();
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
+  const tabContentClass =
+    "space-y-6 absolute inset-0 w-full transition-all duration-300 data-[state=active]:opacity-100 data-[state=active]:translate-x-0 data-[state=inactive]:opacity-0 data-[state=inactive]:translate-x-4 data-[state=inactive]:pointer-events-none [&[hidden]]:block [&[hidden]]:opacity-0";
 
   const { data: tutorProfile } = trpc.tutorProfile.getMy.useQuery(
     undefined,
@@ -297,17 +299,20 @@ export default function TutorDashboard() {
 
               {/* Main Content */}
               <Tabs defaultValue="courses" className="space-y-6">
-                <TabsList className="grid w-full max-w-2xl grid-cols-6">
-                  <TabsTrigger value="profile">Profile</TabsTrigger>
-                  <TabsTrigger value="courses">Courses</TabsTrigger>
-                  <TabsTrigger value="students">Students</TabsTrigger>
-                  <TabsTrigger value="sessions">Sessions</TabsTrigger>
-                  <TabsTrigger value="history">History</TabsTrigger>
-                  <TabsTrigger value="availability">Availability</TabsTrigger>
-                </TabsList>
+                <div className="overflow-x-auto">
+              <TabsList className="inline-flex min-w-max gap-2 sm:w-full sm:flex-wrap sm:justify-start">
+                <TabsTrigger className="whitespace-nowrap" value="profile">Profile</TabsTrigger>
+                <TabsTrigger className="whitespace-nowrap" value="courses">Courses</TabsTrigger>
+                <TabsTrigger className="whitespace-nowrap" value="students">Students</TabsTrigger>
+                <TabsTrigger className="whitespace-nowrap" value="sessions">Sessions</TabsTrigger>
+                <TabsTrigger className="whitespace-nowrap" value="history">History</TabsTrigger>
+                <TabsTrigger className="whitespace-nowrap" value="availability">Availability</TabsTrigger>
+              </TabsList>
+                </div>
 
+                <div className="relative min-h-[540px]">
                 {/* Profile Tab */}
-                <TabsContent value="profile" className="space-y-6">
+                <TabsContent value="profile" forceMount className={tabContentClass}>
                   <h2 className="text-2xl font-bold">Profile Settings</h2>
                   <VideoUploadManager 
                     currentVideoUrl={(tutorProfile as any)?.introVideoUrl}
@@ -315,7 +320,7 @@ export default function TutorDashboard() {
                 </TabsContent>
 
                 {/* Courses Tab */}
-                <TabsContent value="courses" className="space-y-6">
+                <TabsContent value="courses" forceMount className={tabContentClass}>
                   <div className="flex items-center justify-between">
                     <h2 className="text-2xl font-bold">My Courses</h2>
                     <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
@@ -490,7 +495,7 @@ export default function TutorDashboard() {
                 </TabsContent>
 
                 {/* Students Tab */}
-                <TabsContent value="students" className="space-y-6">
+                <TabsContent value="students" forceMount className={tabContentClass}>
                   <h2 className="text-2xl font-bold">My Students</h2>
 
                   {subsLoading ? (
@@ -540,7 +545,7 @@ export default function TutorDashboard() {
                 </TabsContent>
 
                 {/* Sessions Tab */}
-                <TabsContent value="sessions" className="space-y-6">
+                <TabsContent value="sessions" forceMount className={tabContentClass}>
                   <h2 className="text-2xl font-bold">Upcoming Sessions</h2>
 
                   {upcomingSessions && upcomingSessions.length > 0 ? (
@@ -634,7 +639,7 @@ export default function TutorDashboard() {
                 </TabsContent>
 
                 {/* History Tab */}
-                <TabsContent value="history" className="space-y-6">
+                <TabsContent value="history" forceMount className={tabContentClass}>
                   <h2 className="text-2xl font-bold">Session History</h2>
 
                   {historyLoading ? (
@@ -764,7 +769,7 @@ export default function TutorDashboard() {
                 </TabsContent>
 
                 {/* Availability Tab */}
-                <TabsContent value="availability" className="space-y-6">
+                <TabsContent value="availability" forceMount className={tabContentClass}>
                   <div className="flex items-center gap-2 mb-6">
                     <Clock className="h-6 w-6" />
                     <h2 className="text-2xl font-bold">Manage Availability</h2>
@@ -778,6 +783,7 @@ export default function TutorDashboard() {
                     <TimeBlockManager />
                   </div>
                 </TabsContent>
+                </div>
               </Tabs>
             </>
           )}
