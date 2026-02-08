@@ -22,6 +22,8 @@ export default function Messages() {
   const [messageContent, setMessageContent] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [globalSearch, setGlobalSearch] = useState("");
+  const TEN_DAYS_MS = 10 * 24 * 60 * 60 * 1000;
 
   const isParent = user?.role === "parent";
   const isTutor = user?.role === "tutor";
@@ -190,35 +192,100 @@ export default function Messages() {
   const selectedStudent = studentsWithTutors?.find(s => s.id === selectedStudentId);
   const selectedTutor = selectedStudent?.tutors.find((t: any) => t.id === selectedTutorId);
 
-  const tutorListForUI = isTutor
-    ? (tutorConversations || []).map((c: any) => ({
-        conversationId: c.conversation.id,
-        parentName: c.parent.name || c.parent.email || "Parent",
-        studentName: (() => {
-          const name = c.subscription
-            ? `${c.subscription.studentFirstName || ""} ${c.subscription.studentLastName || ""}`.trim()
-            : "";
-          if (name) return name;
-          if (c.course?.title) return c.course.title;
-          return "Student";
-        })(),
-        courseTitle: c.course?.title || "Course",
-        studentId: c.conversation.studentId,
-      }))
+  const searchTerm = globalSearch.trim().toLowerCase();
+
+  const filteredStudents = (studentsWithTutors || []).filter((student) => {
+    if (!searchTerm) return true;
+    const nameMatch = `${student.firstName} ${student.lastName}`.toLowerCase().includes(searchTerm);
+    const courseMatch = (student.tutors || []).some(
+      (t: any) => (t.courseTitle || "").toLowerCase().includes(searchTerm)
+    );
+    return nameMatch || courseMatch;
+  });
+
+  const filteredTutors = selectedStudent
+    ? selectedStudent.tutors
+        .filter((tutor: any) => {
+          // If searching, include all tutors regardless of recency
+          if (searchTerm) return true;
+          if (!tutor.lastMessageAt) return false;
+          const lastMessageAtMs = Number(tutor.lastMessageAt);
+          if (Number.isNaN(lastMessageAtMs)) return false;
+          return Date.now() - lastMessageAtMs <= TEN_DAYS_MS;
+        })
+        .filter((tutor: any) => {
+          if (!searchTerm) return true;
+          return (
+            (tutor.name || "").toLowerCase().includes(searchTerm) ||
+            (tutor.courseTitle || "").toLowerCase().includes(searchTerm)
+          );
+        })
     : [];
+
+  const tutorListForUI = isTutor
+    ? (tutorConversations || []).map((c: any) => {
+        const enrollmentDate = c.subscription?.startDate || c.subscription?.createdAt;
+        const enrollmentDateLabel = enrollmentDate
+          ? new Date(enrollmentDate).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
+          : "";
+
+        return {
+          conversationId: c.conversation.id,
+          parentName: c.parent.name || c.parent.email || "Parent",
+          studentName: (() => {
+            const name = c.subscription
+              ? `${c.subscription.studentFirstName || ""} ${c.subscription.studentLastName || ""}`.trim()
+              : "";
+            if (name) return name;
+            if (c.course?.title) return c.course.title;
+            return "Student";
+          })(),
+          courseTitle: c.course?.title || "Course",
+          studentId: c.conversation.studentId,
+          enrollmentDateLabel,
+          lastMessageAt: Number(c.conversation.lastMessageAt),
+        };
+      })
+    : [];
+
+  const filteredTutorListForUI = tutorListForUI
+    .filter((item) => {
+      if (searchTerm) return true; // when searching, show all conversations regardless of recency
+      if (!item.lastMessageAt || Number.isNaN(item.lastMessageAt)) return false;
+      return Date.now() - item.lastMessageAt <= TEN_DAYS_MS;
+    })
+    .filter((item) => {
+    if (!searchTerm) return true;
+
+    return [
+      item.studentName,
+      item.parentName,
+      item.courseTitle,
+      item.enrollmentDateLabel,
+    ]
+      .filter(Boolean)
+      .some((value) => value!.toLowerCase().includes(searchTerm));
+  });
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <Navigation />
 
       <div className="flex-1 container py-6">
-        <div className="mb-6">
-          <h1 className="text-3xl font-bold">Messages</h1>
-          <p className="text-muted-foreground">
-            {user?.role === "parent" 
-              ? "Select a student to view their tutors and messages" 
-              : "Communicate with parents"}
-          </p>
+        <div className="mb-6 space-y-4">
+          <div>
+            <h1 className="text-3xl font-bold">Messages</h1>
+            <p className="text-muted-foreground">
+              {user?.role === "parent" 
+                ? "Select a student to view their tutors and messages" 
+                : "Communicate with parents"}
+            </p>
+          </div>
+          <Input
+            placeholder="Search conversations"
+            value={globalSearch}
+            onChange={(e) => setGlobalSearch(e.target.value)}
+          />
         </div>
 
         <div className="grid lg:grid-cols-4 gap-6 h-[calc(100vh-16rem)]">
@@ -240,16 +307,16 @@ export default function Messages() {
                           <Skeleton key={i} className="h-20 w-full" />
                         ))}
                       </div>
-                    ) : studentsWithTutors && studentsWithTutors.length > 0 ? (
+                    ) : filteredStudents.length > 0 ? (
                       <div>
-                        {studentsWithTutors.map((student) => (
+                        {filteredStudents.map((student) => (
                           <button
                             key={student.id}
                             onClick={() => {
-                              setSelectedStudentId(student.id);
-                              setSelectedTutorId(null);
-                              setSelectedConversationId(null);
-                            }}
+                          setSelectedStudentId(student.id);
+                          setSelectedTutorId(null);
+                          setSelectedConversationId(null);
+                        }}
                             className={`w-full p-4 text-left hover:bg-muted/50 transition-colors border-b border-border ${
                               selectedStudentId === student.id ? "bg-muted" : ""
                             }`}
@@ -286,9 +353,9 @@ export default function Messages() {
                     ) : (
                       <div className="p-8 text-center">
                         <User className="w-12 h-12 mx-auto mb-3 text-muted-foreground" />
-                        <p className="text-sm text-muted-foreground">No students enrolled yet</p>
+                        <p className="text-sm text-muted-foreground">No students found</p>
                         <p className="text-xs text-muted-foreground mt-1">
-                          Enroll in a course to start messaging tutors
+                          Try a different name or clear the search
                         </p>
                       </div>
                     )}
@@ -307,9 +374,9 @@ export default function Messages() {
                 <CardContent className="p-0">
                   <ScrollArea className="h-[calc(100vh-20rem)]">
                     {selectedStudent ? (
-                      selectedStudent.tutors.length > 0 ? (
+                      filteredTutors.length > 0 ? (
                         <div>
-                          {selectedStudent.tutors.map((tutor: any) => (
+                          {filteredTutors.map((tutor: any) => (
                             <button
                               key={tutor.id}
                               onClick={() => handleTutorSelect(tutor.id)}
@@ -334,7 +401,7 @@ export default function Messages() {
                       ) : (
                         <div className="p-8 text-center">
                           <GraduationCap className="w-12 h-12 mx-auto mb-3 text-muted-foreground" />
-                          <p className="text-sm text-muted-foreground">No tutors found</p>
+                          <p className="text-sm text-muted-foreground">No tutors match that search</p>
                         </div>
                       )
                     ) : (
@@ -362,9 +429,9 @@ export default function Messages() {
                     <div className="p-4 space-y-4">
                       {[1, 2, 3].map(i => <Skeleton key={i} className="h-20 w-full" />)}
                     </div>
-                  ) : tutorListForUI.length > 0 ? (
+                  ) : filteredTutorListForUI.length > 0 ? (
                     <div>
-                      {tutorListForUI.map((item) => (
+                      {filteredTutorListForUI.map((item) => (
                         <button
                           key={item.conversationId}
                           onClick={() => {
@@ -384,6 +451,7 @@ export default function Messages() {
                               <p className="font-medium truncate">{item.studentName}</p>
                               <p className="text-xs text-muted-foreground truncate">
                                 {item.courseTitle} · {item.parentName}
+                                {item.enrollmentDateLabel ? ` · Enrolled ${item.enrollmentDateLabel}` : ""}
                               </p>
                             </div>
                           </div>
@@ -393,7 +461,7 @@ export default function Messages() {
                   ) : (
                     <div className="p-8 text-center">
                       <User className="w-12 h-12 mx-auto mb-3 text-muted-foreground" />
-                      <p className="text-sm text-muted-foreground">No conversations yet</p>
+                      <p className="text-sm text-muted-foreground">No conversations match that search</p>
                       <p className="text-xs text-muted-foreground mt-1">
                         Parents will appear here once they message you.
                       </p>
