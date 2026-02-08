@@ -12,6 +12,7 @@ import {
   tutorTimeBlocks, InsertTutorTimeBlock,
   acuityMappingTemplates, InsertAcuityMappingTemplate,
   emailSettings, InsertEmailSettings,
+  emailVerifications, EmailVerification,
   sessionNotes, InsertSessionNote,
   sessionNoteAttachments, InsertSessionNoteAttachment,
   tutorReviews, InsertTutorReview,
@@ -42,6 +43,10 @@ function generateOpenId() {
   return crypto.randomUUID();
 }
 
+function hashToken(token: string) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
 export async function createAuthUser(input: {
   email: string;
   passwordHash: string;
@@ -65,6 +70,7 @@ export async function createAuthUser(input: {
     name: `${input.firstName} ${input.lastName}`.trim(),
     role: input.role,
     userType: input.userType ?? input.role,
+    emailVerified: false,
     lastSignedIn: now,
     createdAt: now,
     updatedAt: now,
@@ -103,10 +109,6 @@ export async function getUserById(id: number) {
 
 // ============ Refresh Token Management ============
 
-function hashToken(token: string) {
-  return crypto.createHash("sha256").update(token).digest("hex");
-}
-
 export async function storeRefreshToken(userId: number, token: string, expiresAt: Date) {
   const db = await getDb();
   if (!db) return;
@@ -138,6 +140,72 @@ export async function findValidRefreshToken(token: string) {
     )
     .limit(1);
   return results[0] ?? null;
+}
+
+// ============ Email Verification ============
+
+export async function createEmailVerificationToken(userId: number, ttlMs = 1000 * 60 * 60 * 24) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const token = crypto.randomBytes(32).toString("hex");
+  const tokenHash = hashToken(token);
+  const expiresAt = new Date(Date.now() + ttlMs);
+
+  // invalidate previous tokens
+  await db
+    .update(emailVerifications)
+    .set({ consumedAt: new Date() })
+    .where(and(eq(emailVerifications.userId, userId), sql`${emailVerifications.consumedAt} IS NULL`));
+
+  await db.insert(emailVerifications).values({
+    userId,
+    tokenHash,
+    expiresAt,
+  });
+
+  return { token, expiresAt };
+}
+
+export async function validateEmailVerificationToken(token: string): Promise<EmailVerification | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const tokenHash = hashToken(token);
+  const now = new Date();
+  const results = await db
+    .select()
+    .from(emailVerifications)
+    .where(
+      and(
+        eq(emailVerifications.tokenHash, tokenHash),
+        sql`${emailVerifications.expiresAt} > ${now}`,
+        sql`${emailVerifications.consumedAt} IS NULL`
+      )
+    )
+    .limit(1);
+  return results[0] ?? null;
+}
+
+export async function consumeEmailVerificationToken(token: string) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const verification = await validateEmailVerificationToken(token);
+  if (!verification) return null;
+
+  await db.transaction(async tx => {
+    await tx
+      .update(emailVerifications)
+      .set({ consumedAt: new Date() })
+      .where(eq(emailVerifications.id, verification.id));
+
+    await tx
+      .update(users)
+      .set({ emailVerified: true, emailVerifiedAt: new Date() })
+      .where(eq(users.id, verification.userId));
+  });
+
+  return await getUserById(verification.userId);
 }
 
 export async function getAllUsers() {
@@ -1249,11 +1317,21 @@ export async function getStudentsWithTutors(parentId: number) {
             tutorId: courseTutors.tutorId,
             tutorName: users.name,
             tutorEmail: users.email,
+            conversationId: conversations.id,
+            lastMessageAt: conversations.lastMessageAt,
           })
           .from(courseTutors)
           // courseTutors.tutorId points to users.id; join directly to users/tutorProfiles
           .leftJoin(users, eq(courseTutors.tutorId, users.id))
           .leftJoin(tutorProfiles, eq(users.id, tutorProfiles.userId))
+          .leftJoin(
+            conversations,
+            and(
+              eq(conversations.tutorId, courseTutors.tutorId),
+              eq(conversations.parentId, parentId),
+              eq(conversations.studentId, sub.studentId)
+            )
+          )
           .where(eq(courseTutors.courseId, sub.courseId));
 
         const student = studentMap.get(studentKey);
@@ -1264,6 +1342,8 @@ export async function getStudentsWithTutors(parentId: number) {
               name: tutor.tutorName,
               email: tutor.tutorEmail,
               courseTitle: sub.courseTitle,
+              conversationId: tutor.conversationId,
+              lastMessageAt: tutor.lastMessageAt,
             });
           }
         }

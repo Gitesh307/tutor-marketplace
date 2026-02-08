@@ -3,6 +3,7 @@ import { z } from "zod";
 import { authSchema, clearAuthCookies, setAuthCookies, verifyPassword, verifyRefreshToken } from "../services/authService";
 import * as db from "../../db";
 import { REFRESH_TOKEN_COOKIE } from "@shared/const";
+import { sendVerificationEmail } from "../../email-helpers";
 
 export const authRouter = express.Router();
 
@@ -32,6 +33,20 @@ authRouter.post("/signup", async (req, res) => {
     return res.status(500).json({ error: "Failed to create user" });
   }
 
+  try {
+    const token = await db.createEmailVerificationToken(user.id);
+    if (token) {
+      await sendVerificationEmail({
+        userEmail: user.email || email,
+        userName: `${user.firstName} ${user.lastName}`.trim(),
+        verificationUrl: `${process.env.VITE_FRONTEND_FORGE_API_URL || "http://localhost:3000"}/api/auth/verify-email?token=${token.token}`,
+        expiresAt: token.expiresAt,
+      });
+    }
+  } catch (err) {
+    console.error("[Auth] Failed to send verification email:", err);
+  }
+
   // Create a basic profile matching the selected role
   try {
     if (role === "parent") {
@@ -58,14 +73,8 @@ authRouter.post("/signup", async (req, res) => {
     // continue; profile can be completed later
   }
 
-  await setAuthCookies(req, res, {
-    sub: user.id,
-    email: user.email || "",
-    role: user.role as "parent" | "tutor" | "admin",
-  });
-
   const { passwordHash: _pw, ...safeUser } = user as any;
-  res.json({ user: safeUser });
+  res.status(201).json({ user: safeUser, message: "Verification email sent. Please confirm to activate your account." });
 });
 
 authRouter.post("/login", async (req, res) => {
@@ -83,6 +92,10 @@ authRouter.post("/login", async (req, res) => {
   const valid = await verifyPassword(password, user.passwordHash);
   if (!valid) {
     return res.status(401).json({ error: "Invalid credentials" });
+  }
+
+  if (!user.emailVerified) {
+    return res.status(403).json({ error: "Please verify your email before logging in." });
   }
 
   await setAuthCookies(req, res, {
@@ -132,4 +145,40 @@ authRouter.post("/refresh-token", async (req, res) => {
     await clearAuthCookies(req, res);
     res.status(401).json({ error: "Invalid refresh token" });
   }
+});
+
+authRouter.get("/verify-email", async (req, res) => {
+  const token = req.query.token as string | undefined;
+  if (!token) return res.status(400).json({ error: "Missing token" });
+
+  const user = await db.consumeEmailVerificationToken(token);
+  if (!user) {
+    return res.status(400).json({ error: "Invalid or expired token" });
+  }
+
+  await setAuthCookies(req, res, {
+    sub: user.id,
+    email: user.email || "",
+    role: user.role as "parent" | "tutor" | "admin",
+  });
+
+  const { passwordHash: _pw, ...safeUser } = user as any;
+
+  res.format({
+    json: () => res.json({ success: true, user: safeUser }),
+    html: () =>
+      res.send(`
+        <!doctype html>
+        <html>
+        <head><meta charset="utf-8"><title>Email verified</title></head>
+        <body style="font-family: system-ui; max-width: 480px; margin: 40px auto; text-align: center;">
+          <h1>✅ Email verified</h1>
+          <p>Your account is now active. You can close this tab or continue.</p>
+          <a href="/parent/dashboard">Go to dashboard</a>
+          <script>setTimeout(() => { window.location.href = "/parent/dashboard"; }, 1200);</script>
+        </body>
+        </html>
+      `),
+    default: () => res.json({ success: true, user: safeUser }),
+  });
 });
