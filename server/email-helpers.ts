@@ -14,6 +14,9 @@ import {
 
 const BASE_URL = process.env.VITE_FRONTEND_FORGE_API_URL || 'http://localhost:3000';
 
+const emailRedirect = (target: string) =>
+  `${BASE_URL}/api/auth/email-redirect?target=${encodeURIComponent(target)}`;
+
 interface SendWelcomeEmailParams {
   userEmail: string;
   userName: string;
@@ -26,7 +29,11 @@ interface SendWelcomeEmailParams {
 export async function sendWelcomeEmail(params: SendWelcomeEmailParams): Promise<boolean> {
   const { userEmail, userName, userRole } = params;
   
-  const dashboardUrl = `${BASE_URL}/dashboard`;
+  const targetDashboard =
+    userRole === "tutor" ? "/tutor/dashboard" :
+    userRole === "parent" ? "/parent/dashboard" :
+    "/dashboard";
+  const dashboardUrl = emailRedirect(targetDashboard);
   
   const html = getWelcomeEmail({
     userName,
@@ -56,7 +63,7 @@ export async function sendVerificationEmail(params: SendVerificationEmailParams)
     verificationUrl,
     expiresAt,
   });
-
+  
   return await emailService.sendEmail({
     to: userEmail,
     subject: 'Verify your email to activate your account',
@@ -94,8 +101,8 @@ export async function sendBookingConfirmation(params: SendBookingConfirmationPar
     sessionPrice,
   } = params;
   
-  const dashboardUrl = `${BASE_URL}/dashboard`;
-  const messagesUrl = `${BASE_URL}/messages`;
+  const dashboardUrl = emailRedirect("/dashboard");
+  const messagesUrl = emailRedirect("/messages");
   
   const html = getBookingConfirmationEmail({
     userName,
@@ -140,8 +147,8 @@ export async function sendEnrollmentConfirmation(params: SendEnrollmentConfirmat
     courseId,
   } = params;
   
-  const dashboardUrl = `${BASE_URL}/dashboard`;
-  const courseDetailUrl = `${BASE_URL}/courses/${courseId}`;
+  const dashboardUrl = emailRedirect("/dashboard");
+  const courseDetailUrl = emailRedirect(`/courses/${courseId}`);
   
   const html = getEnrollmentConfirmationEmail({
     userName,
@@ -200,7 +207,7 @@ interface SendTutorApprovalEmailParams {
 export async function sendTutorApprovalEmail(params: SendTutorApprovalEmailParams): Promise<boolean> {
   const { tutorEmail, tutorName } = params;
   
-  const dashboardUrl = `${BASE_URL}/tutor/dashboard`;
+  const dashboardUrl = emailRedirect("/tutor/dashboard");
   
   const html = getTutorApprovalEmail({
     tutorName,

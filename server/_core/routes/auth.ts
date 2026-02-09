@@ -174,3 +174,27 @@ authRouter.get("/verify-email", async (req, res) => {
     default: () => res.json({ success: true, message: "Email verified. Please sign in to continue." }),
   });
 });
+
+/**
+ * Universal email link redirector.
+ * - If the user already has a valid refresh token cookie, redirect straight to target.
+ * - Otherwise, send them to login with a next param so they land on the target after login.
+ *
+ * Example: /api/auth/email-redirect?target=/parent/dashboard
+ */
+authRouter.get("/email-redirect", async (req, res) => {
+  const target = (req.query.target as string) || "/dashboard";
+  const refreshToken = req.cookies?.[REFRESH_TOKEN_COOKIE];
+
+  if (refreshToken) {
+    try {
+      await verifyRefreshToken(refreshToken);
+      return res.redirect(target);
+    } catch {
+      // fall through to login redirect
+    }
+  }
+
+  const loginUrl = `/login?next=${encodeURIComponent(target)}`;
+  return res.redirect(loginUrl);
+});
