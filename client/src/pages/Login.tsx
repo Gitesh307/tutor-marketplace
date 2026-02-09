@@ -3,22 +3,35 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import Navigation from "@/components/Navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { useLocation, Link } from "wouter";
 import { toast } from "sonner";
+import { FormInput } from "@/components/forms/FormInput";
+import { useValidatedForm } from "@/hooks/useValidatedForm";
+import { email as emailValidator, required } from "@/lib/validation";
 
 export default function Login() {
   const { login } = useAuth();
   const [, setLocation] = useLocation();
-  const [form, setForm] = useState({ email: "", password: "" });
   const [loading, setLoading] = useState(false);
+  const form = useValidatedForm(
+    { email: "", password: "" },
+    {
+      email: [required("Email is required"), emailValidator()],
+      password: required("Password is required"),
+    }
+  );
+  const { values, register, validateForm } = form;
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const { isValid } = validateForm();
+    if (!isValid) {
+      toast.error("Please fix the highlighted fields.");
+      return;
+    }
     setLoading(true);
     try {
-      const user = await login(form.email, form.password);
+      const user = await login(values.email, values.password);
       toast.success("Logged in");
       if (user?.role === "tutor") {
         setLocation("/tutor/dashboard");
@@ -45,28 +58,20 @@ export default function Login() {
           </CardHeader>
           <CardContent>
             <form className="space-y-4" onSubmit={onSubmit}>
-              <div className="space-y-2">
-                <Label htmlFor="email">Email</Label>
-                <Input
-                  id="email"
-                  type="email"
-                  required
-                  value={form.email}
-                  onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
-                  placeholder="you@example.com"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="password">Password</Label>
-                <Input
-                  id="password"
-                  type="password"
-                  required
-                  value={form.password}
-                  onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
-                  placeholder="••••••••"
-                />
-              </div>
+              <FormInput
+                field={register("email")}
+                label="Email"
+                required
+                type="email"
+                placeholder="you@example.com"
+              />
+              <FormInput
+                field={register("password")}
+                label="Password"
+                required
+                type="password"
+                placeholder="••••••••"
+              />
               <Button type="submit" className="w-full" disabled={loading}>
                 {loading ? "Signing in..." : "Sign In"}
               </Button>

@@ -6,6 +6,20 @@ import { useLocation } from "wouter";
 import { CheckCircle2, Loader2 } from "lucide-react";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { LOGIN_PATH } from "@/const";
+import { useValidatedForm } from "@/hooks/useValidatedForm";
+import {
+  arrayMin,
+  email as emailValidator,
+  hourlyRateString,
+  nonNegativeNumber,
+  required,
+  url as urlValidator,
+} from "@/lib/validation";
+import {
+  FormCheckboxGroup,
+  FormInput,
+  FormTextarea,
+} from "@/components/forms/FormInput";
 
 const SUBJECTS = [
   "Mathematics",
@@ -30,33 +44,51 @@ const GRADE_LEVELS = [
 ];
 
 export default function TutorRegistration() {
-  const { user, isAuthenticated, loading } = useAuth();
+  const { user, isAuthenticated } = useAuth();
   const [, navigate] = useLocation();
   const [submitted, setSubmitted] = useState(false);
+
+  const form = useValidatedForm(
+    {
+      name: "",
+      email: "",
+      phone: "",
+      bio: "",
+      qualifications: "",
+      yearsOfExperience: "",
+      hourlyRate: "",
+      subjects: [] as string[],
+      gradeLevels: [] as string[],
+      acuityLink: "",
+    },
+    {
+      name: required("Full name is required"),
+      email: [required("Email is required"), emailValidator()],
+      bio: required("Please tell us about yourself"),
+      qualifications: required("Qualifications are required"),
+      yearsOfExperience: [
+        required("Years of experience is required"),
+        nonNegativeNumber("Please enter a valid years of experience"),
+      ],
+      hourlyRate: [
+        required("Hourly rate is required"),
+        hourlyRateString("Please enter a valid hourly rate range"),
+      ],
+      subjects: arrayMin(1, "Select at least one subject"),
+      gradeLevels: arrayMin(1, "Select at least one grade level"),
+      acuityLink: urlValidator("Enter a valid scheduling link"),
+    }
+  );
+
+  const { values, register, setValue, validateForm } = form;
 
   // Pre-fill form with user data
   useEffect(() => {
     if (user) {
-      setFormData(prev => ({
-        ...prev,
-        name: user.name || "",
-        email: user.email || "",
-      }));
+      setValue("name", user.name || "", { validate: false });
+      setValue("email", user.email || "", { validate: false });
     }
-  }, [user]);
-  
-  const [formData, setFormData] = useState({
-    name: "",
-    email: "",
-    phone: "",
-    bio: "",
-    qualifications: "",
-    yearsOfExperience: "",
-    hourlyRate: "",
-    subjects: [] as string[],
-    gradeLevels: [] as string[],
-    acuityLink: "",
-  });
+  }, [user, setValue]);
 
   const registerMutation = trpc.tutorProfile.register.useMutation({
     onSuccess: () => {
@@ -68,6 +100,25 @@ export default function TutorRegistration() {
     },
   });
 
+  const parseHourlyRate = (input: string) => {
+    const numberMatches =
+      input
+        .trim()
+        .match(/([0-9]+(?:\.[0-9]+)?)/g)
+        ?.map(Number) || [];
+
+    if (numberMatches.length >= 2) {
+      const [low, high] = numberMatches.slice(0, 2);
+      if (low > 0 && high > 0 && high >= low) {
+        return (low + high) / 2;
+      }
+    } else if (numberMatches.length === 1) {
+      return numberMatches[0] > 0 ? numberMatches[0] : null;
+    }
+
+    return null;
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -77,64 +128,53 @@ export default function TutorRegistration() {
       return;
     }
 
-    // Validation
-    if (!formData.name || !formData.email || !formData.bio || !formData.qualifications) {
-      toast.error("Please fill in all required fields");
+    const { isValid } = validateForm();
+    if (!isValid) {
+      toast.error("Please fix the highlighted fields.");
       return;
     }
 
-    if (formData.subjects.length === 0) {
-      toast.error("Please select at least one subject");
-      return;
-    }
-
-    if (formData.gradeLevels.length === 0) {
-      toast.error("Please select at least one grade level");
-      return;
-    }
-
-    const experience = parseInt(formData.yearsOfExperience);
-    if (isNaN(experience) || experience < 0) {
-      toast.error("Please enter a valid years of experience");
-      return;
-    }
-
-    const rate = parseFloat(formData.hourlyRate);
-    if (isNaN(rate) || rate <= 0) {
-      toast.error("Please enter a valid hourly rate");
+    const experience = parseInt(values.yearsOfExperience, 10);
+    const numericRate = parseHourlyRate(values.hourlyRate);
+    if (!numericRate || numericRate <= 0 || Number.isNaN(experience)) {
+      toast.error("Please enter valid experience and hourly rate values.");
       return;
     }
 
     registerMutation.mutate({
-      name: formData.name,
-      email: formData.email,
-      phone: formData.phone || undefined,
-      bio: formData.bio,
-      qualifications: formData.qualifications,
+      name: values.name.trim(),
+      email: values.email.trim(),
+      phone: values.phone || undefined,
+      bio: values.bio,
+      qualifications: values.qualifications,
       yearsOfExperience: experience,
-      hourlyRate: rate,
-      subjects: formData.subjects,
-      gradeLevels: formData.gradeLevels,
-      acuityLink: formData.acuityLink || undefined,
+      hourlyRate: numericRate,
+      subjects: values.subjects,
+      gradeLevels: values.gradeLevels,
+      acuityLink: values.acuityLink || undefined,
     });
   };
 
   const toggleSubject = (subject: string) => {
-    setFormData(prev => ({
-      ...prev,
-      subjects: prev.subjects.includes(subject)
-        ? prev.subjects.filter(s => s !== subject)
-        : [...prev.subjects, subject]
-    }));
+    setValue(
+      "subjects",
+      (prev) =>
+        prev.includes(subject)
+          ? prev.filter((s) => s !== subject)
+          : [...prev, subject],
+      { validate: true, touch: true }
+    );
   };
 
   const toggleGradeLevel = (level: string) => {
-    setFormData(prev => ({
-      ...prev,
-      gradeLevels: prev.gradeLevels.includes(level)
-        ? prev.gradeLevels.filter(l => l !== level)
-        : [...prev.gradeLevels, level]
-    }));
+    setValue(
+      "gradeLevels",
+      (prev) =>
+        prev.includes(level)
+          ? prev.filter((l) => l !== level)
+          : [...prev, level],
+      { validate: true, touch: true }
+    );
   };
 
   if (submitted) {
@@ -199,49 +239,29 @@ export default function TutorRegistration() {
                   {/* Personal Information */}
                   <div className="space-y-4">
                     <h3 className="font-semibold text-lg">Personal Information</h3>
-                    
-                    <div className="space-y-2">
-                      <label htmlFor="name" className="block text-sm font-medium">
-                        Full Name *
-                      </label>
-                      <input
-                        id="name"
-                        type="text"
-                        value={formData.name}
-                        onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                        placeholder="John Doe"
-                        className="w-full px-3 py-2 border border-input rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                    </div>
+
+                    <FormInput
+                      field={register("name")}
+                      label="Full Name"
+                      required
+                      placeholder="John Doe"
+                    />
 
                     <div className="grid md:grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <label htmlFor="email" className="block text-sm font-medium">
-                          Email Address *
-                        </label>
-                        <input
-                          id="email"
-                          type="email"
-                          value={formData.email}
-                          onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                          placeholder="john@example.com"
-                          className="w-full px-3 py-2 border border-input rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-                        />
-                      </div>
+                      <FormInput
+                        field={register("email")}
+                        label="Email Address"
+                        required
+                        type="email"
+                        placeholder="john@example.com"
+                      />
 
-                      <div className="space-y-2">
-                        <label htmlFor="phone" className="block text-sm font-medium">
-                          Phone Number
-                        </label>
-                        <input
-                          id="phone"
-                          type="tel"
-                          value={formData.phone}
-                          onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                          placeholder="+1 (555) 123-4567"
-                          className="w-full px-3 py-2 border border-input rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-                        />
-                      </div>
+                      <FormInput
+                        field={register("phone")}
+                        label="Phone Number"
+                        type="tel"
+                        placeholder="+1 (555) 123-4567"
+                      />
                     </div>
                   </div>
 
@@ -249,120 +269,73 @@ export default function TutorRegistration() {
                   <div className="space-y-4">
                     <h3 className="font-semibold text-lg">Professional Information</h3>
 
-                    <div className="space-y-2">
-                      <label htmlFor="bio" className="block text-sm font-medium">
-                        About You *
-                      </label>
-                      <textarea
-                        id="bio"
-                        value={formData.bio}
-                        onChange={(e) => setFormData({ ...formData, bio: e.target.value })}
-                        placeholder="Tell us about your teaching philosophy, experience, and what makes you a great tutor..."
-                        rows={4}
-                        className="w-full px-3 py-2 border border-input rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                    </div>
+                    <FormTextarea
+                      field={register("bio")}
+                      label="About You"
+                      required
+                      placeholder="Tell us about your teaching philosophy, experience, and what makes you a great tutor..."
+                      rows={4}
+                    />
 
-                    <div className="space-y-2">
-                      <label htmlFor="qualifications" className="block text-sm font-medium">
-                        Qualifications & Education *
-                      </label>
-                      <textarea
-                        id="qualifications"
-                        value={formData.qualifications}
-                        onChange={(e) => setFormData({ ...formData, qualifications: e.target.value })}
-                        placeholder="List your degrees, certifications, and relevant qualifications..."
-                        rows={3}
-                        className="w-full px-3 py-2 border border-input rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                    </div>
+                    <FormTextarea
+                      field={register("qualifications")}
+                      label="Qualifications & Education"
+                      required
+                      placeholder="List your degrees, certifications, and relevant qualifications..."
+                      rows={3}
+                    />
 
                     <div className="grid md:grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <label htmlFor="experience" className="block text-sm font-medium">
-                          Years of Experience *
-                        </label>
-                        <input
-                          id="experience"
-                          type="number"
-                          min="0"
-                          value={formData.yearsOfExperience}
-                          onChange={(e) => setFormData({ ...formData, yearsOfExperience: e.target.value })}
-                          placeholder="5"
-                          className="w-full px-3 py-2 border border-input rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <label htmlFor="rate" className="block text-sm font-medium">
-                          Hourly Rate (USD) *
-                        </label>
-                        <input
-                          id="rate"
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={formData.hourlyRate}
-                          onChange={(e) => setFormData({ ...formData, hourlyRate: e.target.value })}
-                          placeholder="50.00"
-                          className="w-full px-3 py-2 border border-input rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <label htmlFor="acuityLink" className="block text-sm font-medium">
-                        Acuity Scheduling Link (Optional)
-                      </label>
-                      <input
-                        id="acuityLink"
-                        type="url"
-                        value={formData.acuityLink}
-                        onChange={(e) => setFormData({ ...formData, acuityLink: e.target.value })}
-                        placeholder="https://app.acuityscheduling.com/schedule.php?owner=..."
-                        className="w-full px-3 py-2 border border-input rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+                      <FormInput
+                        field={register("yearsOfExperience")}
+                        label="Years of Experience"
+                        required
+                        type="number"
+                        min="0"
+                        placeholder="5"
                       />
-                      <p className="text-xs text-muted-foreground">
-                        If you use Acuity Scheduling, paste your scheduling link here to display your real-time availability to parents.
-                      </p>
+
+                      <FormInput
+                        field={register("hourlyRate")}
+                        label="Hourly Rate Range (USD)"
+                        required
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="50-80"
+                        helperText="Enter a single rate or a range (e.g., 50-80)"
+                      />
                     </div>
+
+                    <FormInput
+                      field={register("acuityLink")}
+                      label="Acuity Scheduling Link (Optional)"
+                      type="url"
+                      placeholder="https://app.acuityscheduling.com/schedule.php?owner=..."
+                      helperText="Share your scheduling link to display real-time availability to parents."
+                    />
                   </div>
 
                   {/* Subjects */}
-                  <div className="space-y-4">
-                    <h3 className="font-semibold text-lg">Subjects You Teach *</h3>
-                    <div className="grid md:grid-cols-3 gap-3">
-                      {SUBJECTS.map((subject) => (
-                        <label key={subject} className="flex items-center space-x-2 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={formData.subjects.includes(subject)}
-                            onChange={() => toggleSubject(subject)}
-                            className="w-4 h-4 rounded border-input text-primary focus:ring-2 focus:ring-ring cursor-pointer"
-                          />
-                          <span className="text-sm">{subject}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
+                  <FormCheckboxGroup
+                    field={register("subjects")}
+                    label="Subjects You Teach"
+                    required
+                    items={SUBJECTS.map((subject) => ({ value: subject, label: subject }))}
+                    selected={values.subjects}
+                    onToggle={toggleSubject}
+                    columns={3}
+                  />
 
                   {/* Grade Levels */}
-                  <div className="space-y-4">
-                    <h3 className="font-semibold text-lg">Grade Levels *</h3>
-                    <div className="grid md:grid-cols-2 gap-3">
-                      {GRADE_LEVELS.map((level) => (
-                        <label key={level} className="flex items-center space-x-2 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={formData.gradeLevels.includes(level)}
-                            onChange={() => toggleGradeLevel(level)}
-                            className="w-4 h-4 rounded border-input text-primary focus:ring-2 focus:ring-ring cursor-pointer"
-                          />
-                          <span className="text-sm">{level}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
+                  <FormCheckboxGroup
+                    field={register("gradeLevels")}
+                    label="Grade Levels"
+                    required
+                    items={GRADE_LEVELS.map((level) => ({ value: level, label: level }))}
+                    selected={values.gradeLevels}
+                    onToggle={toggleGradeLevel}
+                    columns={2}
+                  />
 
                   <div className="flex gap-4 pt-4">
                     <button

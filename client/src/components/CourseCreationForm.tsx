@@ -1,18 +1,12 @@
-import { useState } from "react";
+import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { SelectItem } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
+import { useValidatedForm } from "@/hooks/useValidatedForm";
+import { required, positiveNumber } from "@/lib/validation";
+import { FormInput, FormTextarea, FormSelect } from "@/components/forms/FormInput";
 
 interface CourseCreationFormProps {
   onSuccess?: () => void;
@@ -20,18 +14,45 @@ interface CourseCreationFormProps {
 }
 
 export function CourseCreationForm({ onSuccess, editingCourse }: CourseCreationFormProps) {
-  const [formData, setFormData] = useState({
-    title: editingCourse?.title || "",
-    description: editingCourse?.description || "",
-    subject: editingCourse?.subject || undefined,
-    gradeLevel: editingCourse?.gradeLevel || undefined,
-    price: editingCourse?.price?.toString() || "",
-    duration: editingCourse?.duration?.toString() || "",
-    sessionsPerWeek: editingCourse?.sessionsPerWeek?.toString() || "1",
-    totalSessions: editingCourse?.totalSessions?.toString() || "",
-    imageUrl: editingCourse?.imageUrl || "",
-    curriculum: editingCourse?.curriculum || "",
+  const emptyValues = {
+    title: "",
+    description: "",
+    subject: "",
+    gradeLevel: "",
+    price: "",
+    duration: "",
+    sessionsPerWeek: "1",
+    totalSessions: "",
+    imageUrl: "",
+    curriculum: "",
+  };
+
+  const initialValues = editingCourse
+    ? {
+        title: editingCourse?.title || "",
+        description: editingCourse?.description || "",
+        subject: editingCourse?.subject || "",
+        gradeLevel: editingCourse?.gradeLevel || "",
+        price: editingCourse?.price?.toString() || "",
+        duration: editingCourse?.duration?.toString() || "",
+        sessionsPerWeek: editingCourse?.sessionsPerWeek?.toString() || "1",
+        totalSessions: editingCourse?.totalSessions?.toString() || "",
+        imageUrl: editingCourse?.imageUrl || "",
+        curriculum: editingCourse?.curriculum || "",
+      }
+    : emptyValues;
+
+  const form = useValidatedForm(initialValues, {
+    title: required("Course title is required"),
+    subject: required("Subject is required"),
+    price: [required("Price is required"), positiveNumber("Price must be greater than 0")],
   });
+
+  const { values, register, validateForm, reset } = form;
+
+  useEffect(() => {
+    reset(initialValues);
+  }, [editingCourse, reset]);
 
   const createMutation = trpc.adminCourses.createCourse.useMutation({
     onSuccess: () => {
@@ -55,49 +76,32 @@ export function CourseCreationForm({ onSuccess, editingCourse }: CourseCreationF
   });
 
   const resetForm = () => {
-    setFormData({
-      title: "",
-      description: "",
-      subject: undefined,
-      gradeLevel: undefined,
-      price: "",
-      duration: "",
-      sessionsPerWeek: "1",
-      totalSessions: "",
-      imageUrl: "",
-      curriculum: "",
-    });
+    reset(emptyValues);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    console.log("Form submitted", formData);
-
-    // Validate required fields
-    if (!formData.title || !formData.subject || !formData.price) {
-      console.log("Validation failed", { title: formData.title, subject: formData.subject, price: formData.price });
-      toast.error("Please fill in all required fields (Title, Subject, Price)");
+    const { isValid } = validateForm();
+    if (!isValid) {
+      toast.error("Please fix the highlighted fields.");
       return;
     }
 
     const courseData = {
-      ...formData,
-      subject: formData.subject!, // Ensure subject is always a string
-      duration: formData.duration ? parseInt(formData.duration) : undefined,
-      sessionsPerWeek: parseInt(formData.sessionsPerWeek),
-      totalSessions: formData.totalSessions ? parseInt(formData.totalSessions) : undefined,
+      ...values,
+      subject: values.subject, // Ensure subject is always a string
+      duration: values.duration ? parseInt(values.duration) : undefined,
+      sessionsPerWeek: parseInt(values.sessionsPerWeek),
+      totalSessions: values.totalSessions ? parseInt(values.totalSessions) : undefined,
+      price: values.price ? parseFloat(values.price) : undefined,
     };
 
-    console.log("Course data to submit:", courseData);
-
     if (editingCourse) {
-      console.log("Updating course", editingCourse.id);
       updateMutation.mutate({
         id: editingCourse.id,
         ...courseData,
       });
     } else {
-      console.log("Creating new course");
       createMutation.mutate(courseData);
     }
   };
@@ -131,135 +135,92 @@ export function CourseCreationForm({ onSuccess, editingCourse }: CourseCreationF
       <CardContent>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="title">Course Title *</Label>
-              <Input
-                id="title"
-                value={formData.title}
-                onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-                placeholder="e.g., SAT Math Prep"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="subject">Subject *</Label>
-              <Select
-                value={formData.subject}
-                onValueChange={(value) => setFormData({ ...formData, subject: value })}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select subject" />
-                </SelectTrigger>
-                <SelectContent>
-                  {subjects.map((subject) => (
-                    <SelectItem key={subject} value={subject}>
-                      {subject}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="description">Description</Label>
-            <Textarea
-              id="description"
-              value={formData.description}
-              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-              placeholder="Describe what students will learn..."
-              rows={3}
+            <FormInput
+              field={register("title")}
+              label="Course Title *"
+              required
+              placeholder="e.g., SAT Math Prep"
             />
+
+            <FormSelect
+              field={register("subject")}
+              label="Subject *"
+              required
+              placeholder="Select subject"
+            >
+              {subjects.map((subject) => (
+                <SelectItem key={subject} value={subject}>
+                  {subject}
+                </SelectItem>
+              ))}
+            </FormSelect>
           </div>
+
+          <FormTextarea
+            field={register("description")}
+            label="Description"
+            placeholder="Describe what students will learn..."
+            rows={3}
+          />
 
           <div className="grid grid-cols-3 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="gradeLevel">Grade Level</Label>
-              <Select
-                value={formData.gradeLevel}
-                onValueChange={(value) => setFormData({ ...formData, gradeLevel: value })}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select grade" />
-                </SelectTrigger>
-                <SelectContent>
-                  {gradeLevels.map((grade) => (
-                    <SelectItem key={grade} value={grade}>
-                      {grade}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            <FormSelect
+              field={register("gradeLevel")}
+              label="Grade Level"
+              placeholder="Select grade"
+            >
+              {gradeLevels.map((grade) => (
+                <SelectItem key={grade} value={grade}>
+                  {grade}
+                </SelectItem>
+              ))}
+            </FormSelect>
 
-            <div className="space-y-2">
-              <Label htmlFor="price">Price ($) *</Label>
-              <Input
-                id="price"
-                type="number"
-                step="0.01"
-                value={formData.price}
-                onChange={(e) => setFormData({ ...formData, price: e.target.value })}
-                placeholder="99.99"
-              />
-            </div>
+            <FormInput
+              field={register("price")}
+              label="Price ($) *"
+              required
+              type="number"
+              step="0.01"
+              placeholder="99.99"
+            />
 
-            <div className="space-y-2">
-              <Label htmlFor="duration">Duration (minutes)</Label>
-              <Input
-                id="duration"
-                type="number"
-                value={formData.duration}
-                onChange={(e) => setFormData({ ...formData, duration: e.target.value })}
-                placeholder="60"
-              />
-            </div>
+            <FormInput
+              field={register("duration")}
+              label="Duration (minutes)"
+              type="number"
+              placeholder="60"
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="sessionsPerWeek">Sessions Per Week</Label>
-              <Input
-                id="sessionsPerWeek"
-                type="number"
-                value={formData.sessionsPerWeek}
-                onChange={(e) => setFormData({ ...formData, sessionsPerWeek: e.target.value })}
-                placeholder="1"
-              />
-            </div>
+            <FormInput
+              field={register("sessionsPerWeek")}
+              label="Sessions Per Week"
+              type="number"
+              placeholder="1"
+            />
 
-            <div className="space-y-2">
-              <Label htmlFor="totalSessions">Total Sessions</Label>
-              <Input
-                id="totalSessions"
-                type="number"
-                value={formData.totalSessions}
-                onChange={(e) => setFormData({ ...formData, totalSessions: e.target.value })}
-                placeholder="12"
-              />
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="imageUrl">Image URL</Label>
-            <Input
-              id="imageUrl"
-              value={formData.imageUrl}
-              onChange={(e) => setFormData({ ...formData, imageUrl: e.target.value })}
-              placeholder="https://example.com/image.jpg"
+            <FormInput
+              field={register("totalSessions")}
+              label="Total Sessions"
+              type="number"
+              placeholder="12"
             />
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="curriculum">Curriculum</Label>
-            <Textarea
-              id="curriculum"
-              value={formData.curriculum}
-              onChange={(e) => setFormData({ ...formData, curriculum: e.target.value })}
-              placeholder="Detailed curriculum outline..."
-              rows={5}
-            />
-          </div>
+          <FormInput
+            field={register("imageUrl")}
+            label="Image URL"
+            placeholder="https://example.com/image.jpg"
+          />
+
+          <FormTextarea
+            field={register("curriculum")}
+            label="Curriculum"
+            placeholder="Detailed curriculum outline..."
+            rows={5}
+          />
 
           <div className="flex gap-2">
             <Button

@@ -140,6 +140,27 @@
 }
 
 @layer components {
+  .form-field {
+    @apply space-y-1.5;
+  }
+
+  .form-label {
+    @apply text-sm font-medium;
+  }
+
+  .form-helper {
+    @apply text-muted-foreground text-sm;
+  }
+
+  .form-error {
+    @apply text-destructive text-sm;
+  }
+
+  input[type="checkbox"][aria-invalid="true"],
+  input[type="radio"][aria-invalid="true"] {
+    @apply border-destructive ring-2 ring-destructive/20;
+  }
+
   /**
    * Custom container utility that centers content and adds responsive padding.
    *

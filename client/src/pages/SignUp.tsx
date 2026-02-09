@@ -3,47 +3,47 @@ import { useLocation, Link } from "wouter";
 import Navigation from "@/components/Navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { GraduationCap } from "lucide-react";
 import { useAuth } from "@/_core/hooks/useAuth";
+import {
+  FormInput,
+  FormTextarea,
+} from "@/components/forms/FormInput";
+import { useValidatedForm } from "@/hooks/useValidatedForm";
+import {
+  email as emailValidator,
+  required,
+} from "@/lib/validation";
 
 export default function SignUp() {
   const [, setLocation] = useLocation();
   const { signup } = useAuth();
-  const [formData, setFormData] = useState({
-    firstName: "",
-    lastName: "",
-    email: "",
-    password: "",
-    phone: "",
-    educationalNeeds: "",
-    role: "parent" as "parent" | "tutor" | "admin",
-  });
+  const form = useValidatedForm(
+    {
+      firstName: "",
+      lastName: "",
+      email: "",
+      password: "",
+      phone: "",
+      educationalNeeds: "",
+      role: "parent" as "parent" | "tutor" | "admin",
+    },
+    {
+      firstName: required("First name is required"),
+      lastName: required("Last name is required"),
+      email: [required("Email is required"), emailValidator()],
+      password: required("Password is required"),
+    }
+  );
+  const { values, register, validateForm } = form;
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    setFormData({
-      ...formData,
-      [e.target.name]: e.target.value,
-    });
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Validation
-    if (!formData.firstName || !formData.lastName || !formData.email || !formData.password) {
-      toast.error("Please fill in all required fields");
-      return;
-    }
-
-    // Email validation
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(formData.email)) {
-      toast.error("Please enter a valid email address");
+    const { isValid } = validateForm();
+    if (!isValid) {
+      toast.error("Please fix the highlighted fields.");
       return;
     }
 
@@ -51,16 +51,17 @@ export default function SignUp() {
 
     try {
       await signup({
-        firstName: formData.firstName,
-        lastName: formData.lastName,
-        email: formData.email,
-        password: formData.password,
-        role: formData.role,
+        firstName: values.firstName,
+        lastName: values.lastName,
+        email: values.email,
+        password: values.password,
+        role: values.role,
       });
       toast.success("Account created! Check your email for the verification link.");
       setLocation("/login");
     } catch (error) {
-      toast.error("Something went wrong. Please try again.");
+      const message = error instanceof Error ? error.message : "Something went wrong. Please try again.";
+      toast.error(message);
       setIsSubmitting(false);
     }
   };
@@ -91,91 +92,50 @@ export default function SignUp() {
             <CardContent>
               <form onSubmit={handleSubmit} className="space-y-6">
                 <div className="grid md:grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="firstName">
-                      First Name <span className="text-destructive">*</span>
-                    </Label>
-                    <Input
-                      id="firstName"
-                      name="firstName"
-                      value={formData.firstName}
-                      onChange={handleChange}
-                      placeholder="John"
-                      required
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="lastName">
-                      Last Name <span className="text-destructive">*</span>
-                    </Label>
-                    <Input
-                      id="lastName"
-                      name="lastName"
-                      value={formData.lastName}
-                      onChange={handleChange}
-                      placeholder="Doe"
-                      required
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="email">
-                    Email Address <span className="text-destructive">*</span>
-                  </Label>
-                  <Input
-                    id="email"
-                    name="email"
-                    type="email"
-                    value={formData.email}
-                    onChange={handleChange}
-                    placeholder="john.doe@example.com"
+                  <FormInput
+                    field={register("firstName")}
+                    label="First Name"
                     required
+                    placeholder="John"
                   />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="password">
-                    Password <span className="text-destructive">*</span>
-                  </Label>
-                  <Input
-                    id="password"
-                    name="password"
-                    type="password"
-                    value={formData.password}
-                    onChange={handleChange}
-                    placeholder="••••••••"
+                  <FormInput
+                    field={register("lastName")}
+                    label="Last Name"
                     required
+                    placeholder="Doe"
                   />
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="phone">Phone Number</Label>
-                  <Input
-                    id="phone"
-                    name="phone"
-                    type="tel"
-                    value={formData.phone}
-                    onChange={handleChange}
-                    placeholder="+1 (555) 123-4567"
-                  />
-                </div>
+                <FormInput
+                  field={register("email")}
+                  label="Email Address"
+                  required
+                  type="email"
+                  placeholder="john.doe@example.com"
+                />
 
-                <div className="space-y-2">
-                  <Label htmlFor="educationalNeeds">Educational Needs</Label>
-                  <Textarea
-                    id="educationalNeeds"
-                    name="educationalNeeds"
-                    value={formData.educationalNeeds}
-                    onChange={handleChange}
-                    placeholder="Tell us about your learning goals, subjects you need help with, or any specific requirements..."
-                    rows={4}
-                  />
-                  <p className="text-sm text-muted-foreground">
-                    Help us match you with the perfect tutor by sharing your educational goals
-                  </p>
-                </div>
+                <FormInput
+                  field={register("password")}
+                  label="Password"
+                  required
+                  type="password"
+                  placeholder="••••••••"
+                />
+
+                <FormInput
+                  field={register("phone")}
+                  label="Phone Number"
+                  type="tel"
+                  placeholder="+1 (555) 123-4567"
+                />
+
+                <FormTextarea
+                  field={register("educationalNeeds")}
+                  label="Educational Needs"
+                  placeholder="Tell us about your learning goals, subjects you need help with, or any specific requirements..."
+                  rows={4}
+                  helperText="Help us match you with the perfect tutor by sharing your educational goals."
+                />
 
                 <Button
                   type="submit"

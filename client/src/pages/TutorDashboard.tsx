@@ -7,9 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Link, useLocation } from "wouter";
 import { BookOpen, Calendar, MessageSquare, DollarSign, Users, Plus, Edit, Clock, FileText } from "lucide-react";
 import { AvailabilityManager } from "@/components/AvailabilityManager";
@@ -18,6 +16,9 @@ import { VideoUploadManager } from "@/components/VideoUploadManager";
 import { useEffect, useMemo, useState } from "react";
 import { LOGIN_PATH } from "@/const";
 import { toast } from "sonner";
+import { useValidatedForm } from "@/hooks/useValidatedForm";
+import { FormInput, FormTextarea } from "@/components/forms/FormInput";
+import { positiveNumber, required } from "@/lib/validation";
 
 export default function TutorDashboard() {
   const { user, isAuthenticated, loading } = useAuth();
@@ -79,7 +80,7 @@ export default function TutorDashboard() {
     }
   }, [loading, isAuthenticated, user, setLocation]);
 
-  const [courseForm, setCourseForm] = useState({
+  const emptyCourseValues = {
     title: "",
     description: "",
     subject: "",
@@ -88,35 +89,44 @@ export default function TutorDashboard() {
     duration: "",
     sessionsPerWeek: "",
     totalSessions: "",
+  };
+
+  const courseForm = useValidatedForm(emptyCourseValues, {
+    title: required("Course title is required"),
+    subject: required("Subject is required"),
+    price: [required("Price is required"), positiveNumber("Price must be greater than 0")],
   });
+
+  const {
+    values: courseValues,
+    register: courseRegister,
+    validateForm: validateCourseForm,
+    reset: resetCourseForm,
+  } = courseForm;
 
   const handleCreateCourse = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+    const { isValid } = validateCourseForm();
+    if (!isValid) {
+      toast.error("Please fix the highlighted fields.");
+      return;
+    }
+
     try {
       await createCourseMutation.mutateAsync({
-        title: courseForm.title,
-        description: courseForm.description,
-        subject: courseForm.subject,
-        gradeLevel: courseForm.gradeLevel,
-        price: courseForm.price,
-        duration: parseInt(courseForm.duration) || undefined,
-        sessionsPerWeek: parseInt(courseForm.sessionsPerWeek) || undefined,
-        totalSessions: parseInt(courseForm.totalSessions) || undefined,
+        title: courseValues.title,
+        description: courseValues.description,
+        subject: courseValues.subject,
+        gradeLevel: courseValues.gradeLevel,
+        price: courseValues.price,
+        duration: parseInt(courseValues.duration) || undefined,
+        sessionsPerWeek: parseInt(courseValues.sessionsPerWeek) || undefined,
+        totalSessions: parseInt(courseValues.totalSessions) || undefined,
       });
 
       toast.success("Course created successfully!");
       setIsCreateDialogOpen(false);
-      setCourseForm({
-        title: "",
-        description: "",
-        subject: "",
-        gradeLevel: "",
-        price: "",
-        duration: "",
-        sessionsPerWeek: "",
-        totalSessions: "",
-      });
+      resetCourseForm(emptyCourseValues);
       refetchCourses();
     } catch (error) {
       toast.error("Failed to create course");
@@ -338,84 +348,60 @@ export default function TutorDashboard() {
                           </DialogDescription>
                         </DialogHeader>
                         <form onSubmit={handleCreateCourse} className="space-y-4">
-                          <div>
-                            <Label htmlFor="title">Course Title *</Label>
-                            <Input
-                              id="title"
-                              value={courseForm.title}
-                              onChange={(e) => setCourseForm({ ...courseForm, title: e.target.value })}
+                          <FormInput
+                            field={courseRegister("title")}
+                            label="Course Title *"
+                            required
+                            placeholder="e.g., Algebra II Foundations"
+                          />
+                          <FormTextarea
+                            field={courseRegister("description")}
+                            label="Description"
+                            rows={4}
+                            placeholder="Describe what students will learn..."
+                          />
+                          <div className="grid grid-cols-2 gap-4">
+                            <FormInput
+                              field={courseRegister("subject")}
+                              label="Subject *"
                               required
+                              placeholder="Mathematics"
                             />
-                          </div>
-                          <div>
-                            <Label htmlFor="description">Description</Label>
-                            <Textarea
-                              id="description"
-                              value={courseForm.description}
-                              onChange={(e) => setCourseForm({ ...courseForm, description: e.target.value })}
-                              rows={4}
+                            <FormInput
+                              field={courseRegister("gradeLevel")}
+                              label="Grade Level"
+                              placeholder="Middle School"
                             />
                           </div>
                           <div className="grid grid-cols-2 gap-4">
-                            <div>
-                              <Label htmlFor="subject">Subject *</Label>
-                              <Input
-                                id="subject"
-                                value={courseForm.subject}
-                                onChange={(e) => setCourseForm({ ...courseForm, subject: e.target.value })}
-                                required
-                              />
-                            </div>
-                            <div>
-                              <Label htmlFor="gradeLevel">Grade Level</Label>
-                              <Input
-                                id="gradeLevel"
-                                value={courseForm.gradeLevel}
-                                onChange={(e) => setCourseForm({ ...courseForm, gradeLevel: e.target.value })}
-                              />
-                            </div>
+                            <FormInput
+                              field={courseRegister("price")}
+                              label="Price ($) *"
+                              required
+                              type="number"
+                              step="0.01"
+                              placeholder="99.00"
+                            />
+                            <FormInput
+                              field={courseRegister("duration")}
+                              label="Session Duration (min)"
+                              type="number"
+                              placeholder="60"
+                            />
                           </div>
                           <div className="grid grid-cols-2 gap-4">
-                            <div>
-                              <Label htmlFor="price">Price ($) *</Label>
-                              <Input
-                                id="price"
-                                type="number"
-                                step="0.01"
-                                value={courseForm.price}
-                                onChange={(e) => setCourseForm({ ...courseForm, price: e.target.value })}
-                                required
-                              />
-                            </div>
-                            <div>
-                              <Label htmlFor="duration">Session Duration (min)</Label>
-                              <Input
-                                id="duration"
-                                type="number"
-                                value={courseForm.duration}
-                                onChange={(e) => setCourseForm({ ...courseForm, duration: e.target.value })}
-                              />
-                            </div>
-                          </div>
-                          <div className="grid grid-cols-2 gap-4">
-                            <div>
-                              <Label htmlFor="sessionsPerWeek">Sessions Per Week</Label>
-                              <Input
-                                id="sessionsPerWeek"
-                                type="number"
-                                value={courseForm.sessionsPerWeek}
-                                onChange={(e) => setCourseForm({ ...courseForm, sessionsPerWeek: e.target.value })}
-                              />
-                            </div>
-                            <div>
-                              <Label htmlFor="totalSessions">Total Sessions</Label>
-                              <Input
-                                id="totalSessions"
-                                type="number"
-                                value={courseForm.totalSessions}
-                                onChange={(e) => setCourseForm({ ...courseForm, totalSessions: e.target.value })}
-                              />
-                            </div>
+                            <FormInput
+                              field={courseRegister("sessionsPerWeek")}
+                              label="Sessions Per Week"
+                              type="number"
+                              placeholder="1"
+                            />
+                            <FormInput
+                              field={courseRegister("totalSessions")}
+                              label="Total Sessions"
+                              type="number"
+                              placeholder="10"
+                            />
                           </div>
                           <div className="flex justify-end gap-3 pt-4">
                             <Button type="button" variant="outline" onClick={() => setIsCreateDialogOpen(false)}>

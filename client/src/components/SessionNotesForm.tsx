@@ -1,12 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { FileText, Save, Upload } from "lucide-react";
 import { FileUpload } from "@/components/FileUpload";
+import { useValidatedForm } from "@/hooks/useValidatedForm";
+import { required } from "@/lib/validation";
+import { FormTextarea } from "@/components/forms/FormInput";
 
 interface SessionNotesFormProps {
   sessionId: number;
@@ -22,12 +23,24 @@ interface SessionNotesFormProps {
 }
 
 export function SessionNotesForm({ sessionId, parentId, existingNote, onSuccess }: SessionNotesFormProps) {
-  const [progressSummary, setProgressSummary] = useState(existingNote?.progressSummary || "");
-  const [homework, setHomework] = useState(existingNote?.homework || "");
-  const [challenges, setChallenges] = useState(existingNote?.challenges || "");
-  const [nextSteps, setNextSteps] = useState(existingNote?.nextSteps || "");
+  const initialValues = {
+    progressSummary: existingNote?.progressSummary || "",
+    homework: existingNote?.homework || "",
+    challenges: existingNote?.challenges || "",
+    nextSteps: existingNote?.nextSteps || "",
+  };
+
+  const form = useValidatedForm(initialValues, {
+    progressSummary: required("Please provide a progress summary"),
+  });
+
+  const { values, register, validateForm, reset } = form;
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isUploading, setIsUploading] = useState(false);
+
+  useEffect(() => {
+    reset(initialValues);
+  }, [existingNote, reset]);
 
   const createMutation = trpc.sessionNotes.create.useMutation();
   const updateMutation = trpc.sessionNotes.update.useMutation();
@@ -36,8 +49,9 @@ export function SessionNotesForm({ sessionId, parentId, existingNote, onSuccess 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!progressSummary.trim()) {
-      toast.error("Please provide a progress summary");
+    const { isValid } = validateForm();
+    if (!isValid) {
+      toast.error("Please fix the highlighted fields.");
       return;
     }
 
@@ -47,10 +61,10 @@ export function SessionNotesForm({ sessionId, parentId, existingNote, onSuccess 
       if (existingNote) {
         await updateMutation.mutateAsync({
           id: existingNote.id,
-          progressSummary,
-          homework: homework || undefined,
-          challenges: challenges || undefined,
-          nextSteps: nextSteps || undefined,
+          progressSummary: values.progressSummary,
+          homework: values.homework || undefined,
+          challenges: values.challenges || undefined,
+          nextSteps: values.nextSteps || undefined,
         });
         noteId = existingNote.id;
         toast.success("Session notes updated successfully");
@@ -58,10 +72,10 @@ export function SessionNotesForm({ sessionId, parentId, existingNote, onSuccess 
         const created = await createMutation.mutateAsync({
           sessionId,
           parentId,
-          progressSummary,
-          homework: homework || undefined,
-          challenges: challenges || undefined,
-          nextSteps: nextSteps || undefined,
+          progressSummary: values.progressSummary,
+          homework: values.homework || undefined,
+          challenges: values.challenges || undefined,
+          nextSteps: values.nextSteps || undefined,
         });
         noteId = created.id;
         toast.success("Session notes created successfully");
@@ -120,52 +134,38 @@ export function SessionNotesForm({ sessionId, parentId, existingNote, onSuccess 
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="progressSummary">
-              Progress Summary <span className="text-destructive">*</span>
-            </Label>
-            <Textarea
-              id="progressSummary"
-              placeholder="What did the student accomplish today? What concepts did they master?"
-              value={progressSummary}
-              onChange={(e) => setProgressSummary(e.target.value)}
-              rows={4}
-              required
-            />
-          </div>
+          <FormTextarea
+            field={register("progressSummary")}
+            label={
+              <>
+                Progress Summary <span className="text-destructive">*</span>
+              </>
+            }
+            required
+            placeholder="What did the student accomplish today? What concepts did they master?"
+            rows={4}
+          />
 
-          <div className="space-y-2">
-            <Label htmlFor="homework">Homework Assigned</Label>
-            <Textarea
-              id="homework"
-              placeholder="Practice problems, reading assignments, or tasks to complete before next session"
-              value={homework}
-              onChange={(e) => setHomework(e.target.value)}
-              rows={3}
-            />
-          </div>
+          <FormTextarea
+            field={register("homework")}
+            label="Homework Assigned"
+            placeholder="Practice problems, reading assignments, or tasks to complete before next session"
+            rows={3}
+          />
 
-          <div className="space-y-2">
-            <Label htmlFor="challenges">Challenges & Areas for Improvement</Label>
-            <Textarea
-              id="challenges"
-              placeholder="Topics the student found difficult or needs more practice with"
-              value={challenges}
-              onChange={(e) => setChallenges(e.target.value)}
-              rows={3}
-            />
-          </div>
+          <FormTextarea
+            field={register("challenges")}
+            label="Challenges & Areas for Improvement"
+            placeholder="Topics the student found difficult or needs more practice with"
+            rows={3}
+          />
 
-          <div className="space-y-2">
-            <Label htmlFor="nextSteps">Next Steps & Recommendations</Label>
-            <Textarea
-              id="nextSteps"
-              placeholder="What should we focus on in the next session? Any recommendations for parents?"
-              value={nextSteps}
-              onChange={(e) => setNextSteps(e.target.value)}
-              rows={3}
-            />
-          </div>
+          <FormTextarea
+            field={register("nextSteps")}
+            label="Next Steps & Recommendations"
+            placeholder="What should we focus on in the next session? Any recommendations for parents?"
+            rows={3}
+          />
 
           {!existingNote && (
             <div className="space-y-2">
