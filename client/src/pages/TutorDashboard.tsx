@@ -61,6 +61,7 @@ export default function TutorDashboard() {
   );
 
   const [sessionNotes, setSessionNotes] = useState<Record<number, string>>({});
+  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   type PreferenceState = { preferred: boolean; hourlyRate: string; approvalStatus?: string };
   const [preferenceState, setPreferenceState] = useState<Record<number, PreferenceState>>({});
 

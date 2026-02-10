@@ -22,7 +22,7 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { trpc } from "@/lib/trpc";
-import { motion } from "framer-motion";
+import { motion, type Variants } from "framer-motion";
 import useEmblaCarousel from "embla-carousel-react";
 import { StatNumber } from "@/components/motion-primitives/StatNumber";
 import { AnimatedTestimonials } from "@/components/ui/animated-testimonials";
@@ -81,12 +81,12 @@ const scrollReveal = {
   transition: { duration: 0.6, delay: 0.2, ease: [0.33, 1, 0.68, 1] },
 } as const;
 
-const listItemReveal = {
+const listItemReveal: Variants = {
   hidden: { opacity: 0, x: -28 },
   visible: (i: number) => ({
     opacity: 1,
     x: 0,
-    transition: { duration: 0.5, delay: i * 0.16, ease: [0.33, 1, 0.68, 1] },
+    transition: { duration: 0.5, delay: i * 0.16, ease: [0.33, 1, 0.68, 1] as const },
   }),
 };
 

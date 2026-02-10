@@ -294,7 +294,7 @@ export default function ParentDashboard() {
                                   {subscription.studentGrade && ` (${subscription.studentGrade})`}
                                 </span>
                               ) : null}
-                              <span>with {tutor.name || "Tutor"}</span>
+                              <span>with {tutor?.name ?? "Tutor"}</span>
                             </CardDescription>
                           </div>
                           <div className="flex flex-col gap-2 items-end">
@@ -507,9 +507,9 @@ export default function ParentDashboard() {
                     <CardContent>
                       <div className="space-y-4">
                         {filteredSubscriptions.map(({ subscription, course, tutor }) => {
-                          const tutorName = tutor?.name || "Tutor";
+                          const tutorName = tutor?.name ?? "Tutor";
                           const tutorId = tutor?.id;
-                          const hasTutor = Boolean(tutorId);
+                          const hasTutor = typeof tutorId === "number";
                           return (
                           <Card key={subscription.id} className="border-2">
                             <CardHeader>
@@ -526,8 +526,8 @@ export default function ParentDashboard() {
                                   </p>
                                   <SchedulingCalendar
                                     subscriptionId={subscription.id}
-                                    tutorId={tutorId}
-                                    parentId={user?.id || 0}
+                                    tutorId={tutorId!}
+                                    parentId={user?.id ?? 0}
                                   />
                                 </>
                               ) : (
