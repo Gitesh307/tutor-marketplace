@@ -21,6 +21,15 @@ export default function Navigation() {
   const [isVideoModalOpen, setIsVideoModalOpen] = React.useState(false);
   const logoutMutation = trpc.auth.logout.useMutation();
 
+  const { data: unreadData } = trpc.messaging.getUnreadMessageCount.useQuery(
+    undefined,
+    {
+      enabled: isAuthenticated && (user?.role === "parent" || user?.role === "tutor"),
+      refetchInterval: 30_000,
+    }
+  );
+  const unreadCount = unreadData?.count ?? 0;
+
   const handleLogout = async () => {
     await logoutMutation.mutateAsync();
     window.location.href = "/";
@@ -88,7 +97,14 @@ export default function Navigation() {
                 <Link href="/messages" className={`flex items-center gap-2 text-sm font-medium transition-colors hover:text-primary ${
                   location === "/messages" ? "text-primary" : "text-muted-foreground"
                 }`}>
-                  <MessageSquare className="w-4 h-4" />
+                  <span className="relative">
+                    <MessageSquare className="w-4 h-4" />
+                    {unreadCount > 0 && (
+                      <span className="absolute -top-1.5 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white">
+                        {unreadCount > 9 ? "9+" : unreadCount}
+                      </span>
+                    )}
+                  </span>
                   Messages
                 </Link>
               </>
@@ -127,8 +143,18 @@ export default function Navigation() {
                   </DropdownMenuItem>
                   <DropdownMenuItem asChild>
                     <Link href="/messages" className="flex items-center w-full cursor-pointer">
-                      <MessageSquare className="w-4 h-4 mr-2" />
+                      <span className="relative mr-2">
+                        <MessageSquare className="w-4 h-4" />
+                        {unreadCount > 0 && (
+                          <span className="absolute -top-1.5 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white">
+                            {unreadCount > 9 ? "9+" : unreadCount}
+                          </span>
+                        )}
+                      </span>
                       Messages
+                      {unreadCount > 0 && (
+                        <span className="ml-auto text-xs font-semibold text-red-500">{unreadCount} new</span>
+                      )}
                     </Link>
                   </DropdownMenuItem>
                   {user.role === 'admin' && (

@@ -99,13 +99,12 @@ export default function CourseDetail() {
         studentGrade: studentGrade || "Not specified",
       });
 
-      setIsEnrollDialogOpen(false);
       if (result?.success) {
+        setIsEnrollDialogOpen(false);
         toast.success("Enrollment completed and payment marked as paid.");
         setLocation("/parent/dashboard");
       } else {
-        toast.success("Enrollment completed.");
-        setLocation("/parent/dashboard");
+        toast.error("Enrollment failed. Please try again.");
       }
     } catch (error) {
       toast.error("Failed to process enrollment");

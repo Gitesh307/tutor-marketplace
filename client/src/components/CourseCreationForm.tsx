@@ -89,11 +89,11 @@ export function CourseCreationForm({ onSuccess, editingCourse }: CourseCreationF
 
     const courseData = {
       ...values,
-      subject: values.subject, // Ensure subject is always a string
+      subject: values.subject,
       duration: values.duration ? parseInt(values.duration) : undefined,
       sessionsPerWeek: parseInt(values.sessionsPerWeek),
       totalSessions: values.totalSessions ? parseInt(values.totalSessions) : undefined,
-      price: values.price ? parseFloat(values.price) : undefined,
+      price: values.price,
     };
 
     if (editingCourse) {

@@ -404,19 +404,9 @@ export default function TutorDashboard() {
                       ))}
                     </div>
                   ) : (
-                    <Card>
-                      <CardContent className="py-16 text-center">
-                        <BookOpen className="w-16 h-16 mx-auto mb-4 text-muted-foreground" />
-                        <h3 className="text-xl font-semibold mb-2">No Courses Yet</h3>
-                        <p className="text-muted-foreground mb-6">
-                          Create your first course to start teaching
-                        </p>
-                        <Button onClick={() => setIsCreateDialogOpen(true)} className="gap-2">
-                          <Plus className="w-4 h-4" />
-                          Create Course
-                        </Button>
-                      </CardContent>
-                    </Card>
+                    <div className="text-center text-muted-foreground py-6">
+                      No courses available yet. Please check back later.
+                    </div>
                   )}
                 </TabsContent>
 
@@ -519,7 +509,11 @@ export default function TutorDashboard() {
                           <CardContent className="pt-6">
                             <div className="flex items-center justify-between">
                               <div className="flex-1">
-                                <p className="font-semibold">{parent.name || "Parent"}</p>
+                                <p className="font-semibold">
+                                  {subscription.studentFirstName || subscription.studentLastName
+                                    ? `${subscription.studentFirstName ?? ""} ${subscription.studentLastName ?? ""}`.trim()
+                                    : "Student"}
+                                </p>
                                 <p className="text-sm text-muted-foreground">{course.title}</p>
                                 <p className="text-xs text-muted-foreground mt-1">
                                   {subscription.sessionsCompleted || 0} sessions completed

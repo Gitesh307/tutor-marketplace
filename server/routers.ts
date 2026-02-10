@@ -895,17 +895,18 @@ export const appRouter = router({
     mySubscriptionsAsTutor: tutorProcedure.query(async ({ ctx }) => {
       const subs = await db.getSubscriptionsByTutorId(ctx.user.id);
 
-      // Show only pay-later enrollments to avoid duplicates from failed/other payment attempts
-      const payLater = subs.filter(
-        (s) =>
-          s.subscription.paymentStatus === "pending" &&
-          (s.subscription.paymentPlan ?? "full") === "full"
+      // Show all active (non-cancelled) subscriptions
+      const active = subs.filter(
+        (s) => s.subscription.status !== "cancelled"
       );
 
-      // Deduplicate by parent+course (keep the latest)
-      const dedupedMap = new Map<string, typeof payLater[0]>();
-      for (const entry of payLater) {
-        const key = `${entry.subscription.parentId}-${entry.subscription.courseId}`;
+      // Deduplicate by student+course (keep the latest) to avoid showing
+      // duplicate rows when a student re-enrolled after cancellation
+      const dedupedMap = new Map<string, typeof active[0]>();
+      for (const entry of active) {
+        const firstName = (entry.subscription.studentFirstName || "").trim().toLowerCase();
+        const lastName = (entry.subscription.studentLastName || "").trim().toLowerCase();
+        const key = `${entry.subscription.parentId}-${firstName}-${lastName}-${entry.subscription.courseId}`;
         const existing = dedupedMap.get(key);
         if (!existing || (entry.subscription.createdAt ?? 0) > (existing.subscription.createdAt ?? 0)) {
           dedupedMap.set(key, entry);
@@ -1622,6 +1623,11 @@ export const appRouter = router({
 
     getTutorConversations: tutorProcedure.query(async ({ ctx }) => {
       return await db.getTutorConversationsWithDetails(ctx.user.id);
+    }),
+
+    getUnreadMessageCount: protectedProcedure.query(async ({ ctx }) => {
+      const count = await db.getUnreadMessageCount(ctx.user.id);
+      return { count };
     }),
 
     getOrCreateStudentConversation: protectedProcedure

@@ -992,7 +992,18 @@ export async function createSubscription(subscription: InsertSubscription) {
 
   try {
     const result = await db.insert(subscriptions).values(subscription) as any;
-    return Number(result.insertId);
+    const newId = result?.[0]?.insertId ?? (result as any)?.insertId;
+    if (!newId) {
+      // Fallback: fetch the latest subscription for this parent+course
+      const rows = await db
+        .select({ id: subscriptions.id })
+        .from(subscriptions)
+        .where(and(eq(subscriptions.parentId, subscription.parentId), eq(subscriptions.courseId, subscription.courseId)))
+        .orderBy(desc(subscriptions.createdAt))
+        .limit(1);
+      return rows[0]?.id ?? null;
+    }
+    return Number(newId);
   } catch (error) {
     console.error("[Database] Failed to create subscription:", error);
     return null;
@@ -1369,6 +1380,32 @@ export async function markMessagesAsRead(conversationId: number, userId: number)
   } catch (error) {
     console.error("[Database] Failed to mark messages as read:", error);
     return false;
+  }
+}
+
+export async function getUnreadMessageCount(userId: number): Promise<number> {
+  const db = await getDb();
+  if (!db) return 0;
+
+  try {
+    const result = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(messages)
+      .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+      .where(
+        and(
+          eq(messages.isRead, false),
+          sql`${messages.senderId} != ${userId}`,
+          or(
+            eq(conversations.parentId, userId),
+            eq(conversations.tutorId, userId)
+          )
+        )
+      );
+    return Number(result[0]?.count ?? 0);
+  } catch (error) {
+    console.error("[Database] Failed to get unread message count:", error);
+    return 0;
   }
 }
 

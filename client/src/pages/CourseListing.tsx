@@ -42,8 +42,8 @@ export default function CourseListing() {
     });
 
   // Get unique subjects and grade levels for filters
-  const subjects = Array.from(new Set(courses?.map((c) => c.subject) || []));
-  const gradeLevels = Array.from(new Set(courses?.map((c) => c.gradeLevel).filter((g): g is string => g !== null) || []));
+  const subjects = Array.from(new Set(courses?.map((c) => c.subject).filter((s): s is string => !!s) || []));
+  const gradeLevels = Array.from(new Set(courses?.map((c) => c.gradeLevel).filter((g): g is string => !!g) || []));
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
