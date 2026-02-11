@@ -24,6 +24,8 @@ import TutorRegistration from "./pages/TutorRegistration";
 import TutorProfile from "./pages/TutorProfile";
 import ParentPayments from "./pages/ParentPayments";
 import ParentNotifications from "./pages/ParentNotifications";
+import TutorNotifications from "./pages/TutorNotifications";
+import TutorPayments from "./pages/TutorPayments";
 
 function Router() {
   return (
@@ -37,6 +39,8 @@ function Router() {
       <Route path={"/tutor-registration"} component={TutorRegistration} />
       {/* Put specific tutor routes before the dynamic :id route to avoid collisions (e.g., /tutor/dashboard) */}
       <Route path={"/tutor/dashboard"} component={TutorDashboard} />
+      <Route path={"/tutor/notifications"} component={TutorNotifications} />
+      <Route path={"/tutor/payments"} component={TutorPayments} />
       <Route path={"/tutor-profile/:id"} component={TutorProfile} />
       <Route path={"/tutor/:id"} component={TutorDetail} />
       <Route path={"/courses"} component={CourseListing} />

@@ -295,6 +295,28 @@ export type Payment = typeof payments.$inferSelect;
 export type InsertPayment = typeof payments.$inferInsert;
 
 /**
+ * Tutor payout requests — submitted when all sessions for an enrollment are complete
+ */
+export const tutorPayoutRequests = mysqlTable("tutorPayoutRequests", {
+  id: int("id").autoincrement().primaryKey(),
+  tutorId: int("tutorId").notNull().references(() => users.id, { onDelete: "cascade" }),
+  subscriptionId: int("subscriptionId").notNull().references(() => subscriptions.id, { onDelete: "cascade" }),
+  sessionsCompleted: int("sessionsCompleted").notNull(),
+  ratePerSession: decimal("ratePerSession", { precision: 10, scale: 2 }).notNull(),
+  totalAmount: decimal("totalAmount", { precision: 10, scale: 2 }).notNull(),
+  status: mysqlEnum("status", ["pending", "approved", "rejected"]).default("pending").notNull(),
+  adminNotes: text("adminNotes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => ({
+  tutorIdIdx: index("tutorPayoutRequests_tutorId_idx").on(table.tutorId),
+  subscriptionIdIdx: index("tutorPayoutRequests_subscriptionId_idx").on(table.subscriptionId),
+}));
+
+export type TutorPayoutRequest = typeof tutorPayoutRequests.$inferSelect;
+export type InsertTutorPayoutRequest = typeof tutorPayoutRequests.$inferInsert;
+
+/**
  * Platform statistics displayed on home page
  */
 export const platformStats = mysqlTable("platform_stats", {

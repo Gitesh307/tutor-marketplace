@@ -137,6 +137,26 @@ export function AdminDashboard() {
     onError: (err) => toast.error(err.message || "Failed to update preference"),
   });
 
+  const [payoutStatusFilter, setPayoutStatusFilter] = useState<"all" | "pending" | "approved" | "rejected">("pending");
+  const [rejectingId, setRejectingId] = useState<number | null>(null);
+  const [rejectNotes, setRejectNotes] = useState("");
+
+  const { data: payoutRequests = [], isLoading: payoutRequestsLoading, refetch: refetchPayoutRequests } =
+    trpc.adminCourses.getPayoutRequests.useQuery(
+      undefined,
+      { enabled: isAuthenticated && user?.role === "admin" }
+    );
+
+  const updatePayoutMutation = trpc.adminCourses.updatePayoutRequest.useMutation({
+    onSuccess: () => {
+      toast.success("Payout request updated");
+      refetchPayoutRequests();
+      setRejectingId(null);
+      setRejectNotes("");
+    },
+    onError: (err) => toast.error(err.message || "Failed to update payout request"),
+  });
+
   useEffect(() => {
     if (!loading && !isAuthenticated) {
       window.location.href = LOGIN_PATH;
@@ -308,6 +328,7 @@ export function AdminDashboard() {
               <TabsTrigger value="users">Users</TabsTrigger>
               <TabsTrigger value="enrollments">Enrollments</TabsTrigger>
               <TabsTrigger value="payments">Payments</TabsTrigger>
+              <TabsTrigger value="payout-requests">Payout Requests</TabsTrigger>
               <TabsTrigger value="courses">Courses</TabsTrigger>
               <TabsTrigger value="registered-tutors">Registered Tutors</TabsTrigger>
               <TabsTrigger value="availability">Tutor Availability</TabsTrigger>
@@ -816,6 +837,109 @@ export function AdminDashboard() {
                 )}
               </CardContent>
             </Card>
+          </TabsContent>
+
+          {/* Payout Requests Tab */}
+          <TabsContent value="payout-requests" forceMount className={tabContentClass}>
+            <div className="space-y-4">
+              <div className="flex items-center gap-3">
+                <Select value={payoutStatusFilter} onValueChange={(v) => setPayoutStatusFilter(v as any)}>
+                  <SelectTrigger className="w-40">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All</SelectItem>
+                    <SelectItem value="pending">Pending</SelectItem>
+                    <SelectItem value="approved">Approved</SelectItem>
+                    <SelectItem value="rejected">Rejected</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {payoutRequestsLoading ? (
+                <div className="space-y-2">{Array(3).fill(0).map((_, i) => <Skeleton key={i} className="h-24 w-full" />)}</div>
+              ) : (
+                (() => {
+                  const filtered = payoutStatusFilter === "all"
+                    ? payoutRequests
+                    : payoutRequests.filter(r => r.status === payoutStatusFilter);
+                  if (filtered.length === 0) {
+                    return <p className="text-muted-foreground text-center py-8">No payout requests found.</p>;
+                  }
+                  return (
+                    <div className="space-y-3">
+                      {filtered.map((req) => {
+                        const studentName =
+                          req.studentFirstName || req.studentLastName
+                            ? `${req.studentFirstName ?? ""} ${req.studentLastName ?? ""}`.trim()
+                            : "Student";
+                        return (
+                          <Card key={req.id}>
+                            <CardContent className="py-4">
+                              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                                <div className="space-y-1">
+                                  <p className="font-semibold">{req.tutorName} <span className="text-muted-foreground font-normal text-sm">({req.tutorEmail})</span></p>
+                                  <p className="text-sm text-muted-foreground">{req.courseTitle} · Student: {studentName} · Parent: {req.parentName}</p>
+                                  <p className="text-sm text-muted-foreground">{req.sessionsCompleted} sessions · ${parseFloat(req.ratePerSession).toFixed(2)}/session</p>
+                                  {req.adminNotes && <p className="text-sm text-red-600">Note: {req.adminNotes}</p>}
+                                  <p className="text-xs text-muted-foreground">{new Date(req.createdAt).toLocaleDateString()}</p>
+                                </div>
+                                <div className="flex flex-col items-end gap-2 shrink-0">
+                                  <p className="text-xl font-bold">${parseFloat(req.totalAmount).toFixed(2)}</p>
+                                  <Badge className={
+                                    req.status === "approved" ? "bg-green-100 text-green-800 border-green-200" :
+                                    req.status === "rejected" ? "bg-red-100 text-red-800 border-red-200" :
+                                    "bg-yellow-100 text-yellow-800 border-yellow-200"
+                                  }>
+                                    {req.status.charAt(0).toUpperCase() + req.status.slice(1)}
+                                  </Badge>
+                                  {req.status === "pending" && (
+                                    <div className="flex gap-2 mt-1">
+                                      <Button
+                                        size="sm"
+                                        className="bg-green-600 hover:bg-green-700 text-white"
+                                        onClick={() => updatePayoutMutation.mutate({ id: req.id, status: "approved" })}
+                                        disabled={updatePayoutMutation.isPending}
+                                      >
+                                        Approve
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="destructive"
+                                        onClick={() => setRejectingId(rejectingId === req.id ? null : req.id)}
+                                      >
+                                        Reject
+                                      </Button>
+                                    </div>
+                                  )}
+                                  {rejectingId === req.id && (
+                                    <div className="flex gap-2 mt-1 w-full">
+                                      <Input
+                                        placeholder="Rejection reason (optional)"
+                                        value={rejectNotes}
+                                        onChange={(e) => setRejectNotes(e.target.value)}
+                                        className="text-sm h-8"
+                                      />
+                                      <Button
+                                        size="sm"
+                                        variant="destructive"
+                                        onClick={() => updatePayoutMutation.mutate({ id: req.id, status: "rejected", adminNotes: rejectNotes || undefined })}
+                                        disabled={updatePayoutMutation.isPending}
+                                      >
+                                        Confirm
+                                      </Button>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        );
+                      })}
+                    </div>
+                  );
+                })()
+              )}
+            </div>
           </TabsContent>
 
           {/* Courses Tab */}

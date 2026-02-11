@@ -71,11 +71,13 @@ export default function Navigation() {
               Browse Courses
             </Link>
             
-            <Link href="/tutor-registration" className={`text-sm font-medium transition-colors hover:text-primary ${
-              location === "/tutor-registration" ? "text-primary" : "text-muted-foreground"
-            }`}>
-              Become a Tutor
-            </Link>
+            {user?.role !== "tutor" && (
+              <Link href="/tutor-registration" className={`text-sm font-medium transition-colors hover:text-primary ${
+                location === "/tutor-registration" ? "text-primary" : "text-muted-foreground"
+              }`}>
+                Become a Tutor
+              </Link>
+            )}
             
             <button
               onClick={() => setIsVideoModalOpen(true)}
@@ -180,6 +182,22 @@ export default function Navigation() {
                       </DropdownMenuItem>
                       <DropdownMenuItem asChild>
                         <Link href="/parent/notifications" className="flex items-center w-full cursor-pointer">
+                          <Bell className="w-4 h-4 mr-2" />
+                          Notifications
+                        </Link>
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                  {user.role === 'tutor' && (
+                    <>
+                      <DropdownMenuItem asChild>
+                        <Link href="/tutor/payments" className="flex items-center w-full cursor-pointer">
+                          <CreditCard className="w-4 h-4 mr-2" />
+                          Payments
+                        </Link>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem asChild>
+                        <Link href="/tutor/notifications" className="flex items-center w-full cursor-pointer">
                           <Bell className="w-4 h-4 mr-2" />
                           Notifications
                         </Link>

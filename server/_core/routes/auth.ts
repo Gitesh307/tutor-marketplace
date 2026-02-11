@@ -10,7 +10,8 @@ export const authRouter = express.Router();
 authRouter.post("/signup", async (req, res) => {
   const parsed = authSchema.signup.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ error: parsed.error.flatten() });
+    const firstError = parsed.error.issues[0]?.message ?? "Invalid input";
+    return res.status(400).json({ error: firstError });
   }
   const { email, password, firstName, lastName, role } = parsed.data;
 
@@ -80,7 +81,7 @@ authRouter.post("/signup", async (req, res) => {
 authRouter.post("/login", async (req, res) => {
   const parsed = authSchema.login.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ error: parsed.error.flatten() });
+    return res.status(400).json({ error: "Invalid credentials" });
   }
   const { email, password } = parsed.data;
 

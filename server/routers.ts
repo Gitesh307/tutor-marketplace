@@ -281,12 +281,44 @@ export const appRouter = router({
       }),
 
     getSimilar: publicProcedure
-      .input(z.object({ 
+      .input(z.object({
         tutorId: z.number(),
         limit: z.number().optional().default(2),
       }))
       .query(async ({ input }) => {
         return await db.getSimilarTutors(input.tutorId, input.limit);
+      }),
+
+    getNotificationPreferences: tutorProcedure.query(async ({ ctx }) => {
+      const prefs = await db.getNotificationPreferences(ctx.user.id);
+      if (!prefs) {
+        return {
+          emailEnabled: true,
+          inAppEnabled: true,
+          smsEnabled: false,
+          timing24h: true,
+          timing1h: true,
+          timing15min: true,
+        };
+      }
+      return prefs;
+    }),
+
+    updateNotificationPreferences: tutorProcedure
+      .input(z.object({
+        emailEnabled: z.boolean().optional(),
+        inAppEnabled: z.boolean().optional(),
+        smsEnabled: z.boolean().optional(),
+        timing24h: z.boolean().optional(),
+        timing1h: z.boolean().optional(),
+        timing15min: z.boolean().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const success = await db.upsertNotificationPreferences(ctx.user.id, input);
+        if (!success) {
+          throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to update preferences' });
+        }
+        return { success: true };
       }),
   }),
 
@@ -350,8 +382,8 @@ export const appRouter = router({
       return await db.getParentDashboardStats(ctx.user.id);
     }),
 
-    // Notification preferences
-    getNotificationPreferences: parentProcedure.query(async ({ ctx }) => {
+    // Notification preferences (open to all authenticated users so tutors can reuse)
+    getNotificationPreferences: protectedProcedure.query(async ({ ctx }) => {
       const prefs = await db.getNotificationPreferences(ctx.user.id);
       if (!prefs) {
         // Return default preferences
@@ -368,7 +400,7 @@ export const appRouter = router({
       return prefs;
     }),
 
-    updateNotificationPreferences: parentProcedure
+    updateNotificationPreferences: protectedProcedure
       .input(z.object({
         emailEnabled: z.boolean().optional(),
         inAppEnabled: z.boolean().optional(),
@@ -1847,6 +1879,38 @@ export const appRouter = router({
       return await db.getPaymentsByTutorId(ctx.user.id);
     }),
 
+    getCompletedEnrollments: tutorProcedure.query(async ({ ctx }) => {
+      return await db.getCompletedEnrollmentsForTutor(ctx.user.id);
+    }),
+
+    getMyPayoutRequests: tutorProcedure.query(async ({ ctx }) => {
+      return await db.getTutorPayoutRequestsByTutorId(ctx.user.id);
+    }),
+
+    requestPayout: tutorProcedure
+      .input(z.object({ subscriptionId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        // Fetch subscription + course + tutor profile
+        const enrollments = await db.getCompletedEnrollmentsForTutor(ctx.user.id);
+        const enrollment = enrollments.find(e => e.subscriptionId === input.subscriptionId);
+        if (!enrollment) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'Enrollment not found or not eligible for payout' });
+        }
+        const hourlyRate = parseFloat(enrollment.tutorHourlyRate ?? "0");
+        const durationHours = (enrollment.courseDuration ?? 60) / 60;
+        const ratePerSession = hourlyRate * durationHours;
+        const totalAmount = ratePerSession * (enrollment.sessionsCompleted ?? 0);
+        const id = await db.createTutorPayoutRequest({
+          tutorId: ctx.user.id,
+          subscriptionId: input.subscriptionId,
+          sessionsCompleted: enrollment.sessionsCompleted ?? 0,
+          ratePerSession: ratePerSession.toFixed(2),
+          totalAmount: totalAmount.toFixed(2),
+          status: 'pending',
+        });
+        return { id };
+      }),
+
     create: protectedProcedure
       .input(z.object({
         parentId: z.number(),
@@ -2698,7 +2762,7 @@ export const appRouter = router({
             });
             results.imported++;
           } catch (error) {
-            results.errors.push(`Failed to import "${template.name}": ${error}`);
+            results.errors.push(`Failed to import "${template.name}": ${error instanceof Error ? error.message : String(error)}`);
           }
         }
 
@@ -3506,6 +3570,21 @@ export const appRouter = router({
       .query(async () => {
         const tutors = await db.getAllTutorsForAssignment();
         return tutors;
+      }),
+
+    getPayoutRequests: adminProcedure.query(async () => {
+      return await db.getAllTutorPayoutRequests();
+    }),
+
+    updatePayoutRequest: adminProcedure
+      .input(z.object({
+        id: z.number(),
+        status: z.enum(["approved", "rejected"]),
+        adminNotes: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        await db.updateTutorPayoutRequestStatus(input.id, input.status, input.adminNotes);
+        return { success: true };
       }),
   }),
 

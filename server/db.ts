@@ -1,4 +1,5 @@
 import { eq, and, or, like, desc, asc, sql, gte, lte, lt, gt, inArray } from "drizzle-orm";
+import { alias } from "drizzle-orm/mysql-core";
 import { drizzle } from "drizzle-orm/mysql2";
 import crypto from "crypto";
 import { 
@@ -20,7 +21,8 @@ import {
   notificationLogs, InsertNotificationLog,
   inAppNotifications, InsertInAppNotification,
   refreshTokens,
-  tutorCoursePreferences, InsertTutorCoursePreference
+  tutorCoursePreferences, InsertTutorCoursePreference,
+  tutorPayoutRequests, InsertTutorPayoutRequest
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -3595,4 +3597,150 @@ export async function getPastSessionsByTutorId(tutorId: number, limit: number = 
     console.error("[Database] Failed to fetch past sessions:", error);
     return [];
   }
+}
+
+// ============ Tutor Payout Requests ============
+
+export async function getCompletedEnrollmentsForTutor(tutorId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    // Find subscriptions where this tutor is assigned, sessions are all completed, and no payout request exists yet
+    const existingRequests = db
+      .select({ subscriptionId: tutorPayoutRequests.subscriptionId })
+      .from(tutorPayoutRequests)
+      .where(eq(tutorPayoutRequests.tutorId, tutorId));
+
+    const results = await db
+      .select({
+        subscriptionId: subscriptions.id,
+        parentId: subscriptions.parentId,
+        sessionsCompleted: subscriptions.sessionsCompleted,
+        studentFirstName: subscriptions.studentFirstName,
+        studentLastName: subscriptions.studentLastName,
+        courseId: courses.id,
+        courseTitle: courses.title,
+        courseDuration: courses.duration,
+        totalSessions: courses.totalSessions,
+        parentName: users.name,
+        parentEmail: users.email,
+        tutorHourlyRate: tutorProfiles.hourlyRate,
+      })
+      .from(subscriptions)
+      .innerJoin(courses, eq(subscriptions.courseId, courses.id))
+      .innerJoin(users, eq(subscriptions.parentId, users.id))
+      .leftJoin(tutorProfiles, eq(tutorProfiles.userId, tutorId))
+      .where(
+        and(
+          eq(subscriptions.preferredTutorId, tutorId),
+          sql`${subscriptions.sessionsCompleted} >= ${courses.totalSessions}`,
+          sql`${subscriptions.id} NOT IN (${existingRequests})`
+        )
+      );
+
+    return results;
+  } catch (error) {
+    console.error("[Database] Failed to fetch completed enrollments:", error);
+    return [];
+  }
+}
+
+export async function createTutorPayoutRequest(data: InsertTutorPayoutRequest) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db.insert(tutorPayoutRequests).values(data);
+  const insertId = Array.isArray(result) ? result[0]?.insertId : (result as any).insertId;
+  return insertId as number;
+}
+
+export async function getTutorPayoutRequestsByTutorId(tutorId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  const parentUsers = alias(users, "parentUser");
+
+  try {
+    const results = await db
+      .select({
+        id: tutorPayoutRequests.id,
+        subscriptionId: tutorPayoutRequests.subscriptionId,
+        sessionsCompleted: tutorPayoutRequests.sessionsCompleted,
+        ratePerSession: tutorPayoutRequests.ratePerSession,
+        totalAmount: tutorPayoutRequests.totalAmount,
+        status: tutorPayoutRequests.status,
+        adminNotes: tutorPayoutRequests.adminNotes,
+        createdAt: tutorPayoutRequests.createdAt,
+        courseTitle: courses.title,
+        studentFirstName: subscriptions.studentFirstName,
+        studentLastName: subscriptions.studentLastName,
+        parentName: parentUsers.name,
+      })
+      .from(tutorPayoutRequests)
+      .innerJoin(subscriptions, eq(tutorPayoutRequests.subscriptionId, subscriptions.id))
+      .innerJoin(courses, eq(subscriptions.courseId, courses.id))
+      .innerJoin(parentUsers, eq(subscriptions.parentId, parentUsers.id))
+      .where(eq(tutorPayoutRequests.tutorId, tutorId))
+      .orderBy(desc(tutorPayoutRequests.createdAt));
+
+    return results;
+  } catch (error) {
+    console.error("[Database] Failed to fetch tutor payout requests:", error);
+    return [];
+  }
+}
+
+export async function getAllTutorPayoutRequests() {
+  const db = await getDb();
+  if (!db) return [];
+
+  const tutorUsers = alias(users, "tutorUser");
+  const parentUsers = alias(users, "parentUser");
+
+  try {
+    const results = await db
+      .select({
+        id: tutorPayoutRequests.id,
+        tutorId: tutorPayoutRequests.tutorId,
+        subscriptionId: tutorPayoutRequests.subscriptionId,
+        sessionsCompleted: tutorPayoutRequests.sessionsCompleted,
+        ratePerSession: tutorPayoutRequests.ratePerSession,
+        totalAmount: tutorPayoutRequests.totalAmount,
+        status: tutorPayoutRequests.status,
+        adminNotes: tutorPayoutRequests.adminNotes,
+        createdAt: tutorPayoutRequests.createdAt,
+        tutorName: tutorUsers.name,
+        tutorEmail: tutorUsers.email,
+        courseTitle: courses.title,
+        studentFirstName: subscriptions.studentFirstName,
+        studentLastName: subscriptions.studentLastName,
+        parentName: parentUsers.name,
+      })
+      .from(tutorPayoutRequests)
+      .innerJoin(tutorUsers, eq(tutorPayoutRequests.tutorId, tutorUsers.id))
+      .innerJoin(subscriptions, eq(tutorPayoutRequests.subscriptionId, subscriptions.id))
+      .innerJoin(courses, eq(subscriptions.courseId, courses.id))
+      .innerJoin(parentUsers, eq(subscriptions.parentId, parentUsers.id))
+      .orderBy(desc(tutorPayoutRequests.createdAt));
+
+    return results;
+  } catch (error) {
+    console.error("[Database] Failed to fetch all payout requests:", error);
+    return [];
+  }
+}
+
+export async function updateTutorPayoutRequestStatus(
+  id: number,
+  status: "approved" | "rejected",
+  adminNotes?: string
+) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db
+    .update(tutorPayoutRequests)
+    .set({ status, adminNotes: adminNotes ?? null, updatedAt: new Date() })
+    .where(eq(tutorPayoutRequests.id, id));
 }

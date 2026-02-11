@@ -84,7 +84,7 @@ export async function sendSessionReminders() {
               channel: "email",
               timing: timing.key.replace("timing", ""),
               status: "failed",
-              message: `Failed to send: ${error}`,
+              message: `Failed to send: ${error instanceof Error ? error.message : String(error)}`,
             });
           }
         }
