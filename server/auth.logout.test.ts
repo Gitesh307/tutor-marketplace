@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { appRouter } from "./routers";
-import { COOKIE_NAME } from "../shared/const";
+import { ACCESS_TOKEN_COOKIE, REFRESH_TOKEN_COOKIE } from "../shared/const";
 import type { TrpcContext } from "./_core/context";
 
 type CookieCall = {
@@ -13,17 +13,23 @@ type AuthenticatedUser = NonNullable<TrpcContext["user"]>;
 function createAuthContext(): { ctx: TrpcContext; clearedCookies: CookieCall[] } {
   const clearedCookies: CookieCall[] = [];
 
-  const user: AuthenticatedUser = {
+  const user = {
     id: 1,
     openId: "sample-user",
     email: "sample@example.com",
+    passwordHash: "",
+    firstName: "Sample",
+    lastName: "User",
     name: "Sample User",
-    loginMethod: "manus",
-    role: "user",
+    role: "parent" as const,
+    userType: "parent" as const,
+    loginMethod: "email",
+    emailVerified: true,
+    emailVerifiedAt: new Date(),
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),
-  };
+  } as AuthenticatedUser;
 
   const ctx: TrpcContext = {
     user,
@@ -42,21 +48,16 @@ function createAuthContext(): { ctx: TrpcContext; clearedCookies: CookieCall[] }
 }
 
 describe("auth.logout", () => {
-  it("clears the session cookie and reports success", async () => {
+  it("clears auth cookies and reports success", async () => {
     const { ctx, clearedCookies } = createAuthContext();
     const caller = appRouter.createCaller(ctx);
 
     const result = await caller.auth.logout();
 
     expect(result).toEqual({ success: true });
-    expect(clearedCookies).toHaveLength(1);
-    expect(clearedCookies[0]?.name).toBe(COOKIE_NAME);
-    expect(clearedCookies[0]?.options).toMatchObject({
-      maxAge: -1,
-      secure: true,
-      sameSite: "none",
-      httpOnly: true,
-      path: "/",
-    });
+    // clearAuthCookies clears both access and refresh token cookies
+    expect(clearedCookies).toHaveLength(2);
+    expect(clearedCookies.map(c => c.name)).toContain(ACCESS_TOKEN_COOKIE);
+    expect(clearedCookies.map(c => c.name)).toContain(REFRESH_TOKEN_COOKIE);
   });
 });

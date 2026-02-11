@@ -4,12 +4,12 @@ import * as db from "./db";
 // Email configuration using built-in notification system
 // Note: This uses console logging for development. In production, configure SMTP settings.
 const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
+  host: process.env.EMAIL_HOST || "smtp.gmail.com",
+  port: parseInt(process.env.EMAIL_PORT || "587"),
   secure: false,
   auth: {
-    user: "noreply@edkonnect.com",
-    pass: "", // Configure in production
+    user: process.env.EMAIL_USER || "",
+    pass: process.env.EMAIL_PASSWORD || "",
   },
 });
 
