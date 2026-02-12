@@ -1,4 +1,4 @@
-CREATE TABLE `tutor_course_preferences` (
+CREATE TABLE IF NOT EXISTS `tutor_course_preferences` (
 	`id` int AUTO_INCREMENT NOT NULL,
 	`tutorId` int NOT NULL,
 	`courseId` int NOT NULL,
@@ -14,6 +14,7 @@ ALTER TABLE `tutor_course_preferences` ADD CONSTRAINT `tutor_course_preferences_
 ALTER TABLE `tutor_course_preferences` ADD CONSTRAINT `tutor_course_preferences_courseId_courses_id_fk` FOREIGN KEY (`courseId`) REFERENCES `courses`(`id`) ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX `tutor_course_pref_tutor_idx` ON `tutor_course_preferences` (`tutorId`);--> statement-breakpoint
 CREATE INDEX `tutor_course_pref_course_idx` ON `tutor_course_preferences` (`courseId`);
+--> statement-breakpoint
 
 -- Backfill existing course tutor assignments as approved preferences to preserve behavior
 INSERT INTO tutor_course_preferences (tutorId, courseId, hourlyRate, approvalStatus, createdAt, updatedAt)
