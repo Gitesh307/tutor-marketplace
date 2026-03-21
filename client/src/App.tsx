@@ -21,15 +21,20 @@ import Messages from "./pages/Messages";
 import SignUp from "./pages/SignUp";
 import Login from "./pages/Login";
 import SetupPassword from "./pages/SetupPassword";
+import ForgotPassword from "./pages/ForgotPassword";
+import ResetPassword from "./pages/ResetPassword";
 import { ManageBooking } from "./pages/ManageBooking";
 import SessionNotesHistory from "./pages/SessionNotesHistory";
 import { FindTutors } from "./pages/FindTutors";
 import TutorRegistration from "./pages/TutorRegistration";
-import TutorProfile from "./pages/TutorProfile";
 import ParentPayments from "./pages/ParentPayments";
 import ParentNotifications from "./pages/ParentNotifications";
 import TutorNotifications from "./pages/TutorNotifications";
 import TutorPayments from "./pages/TutorPayments";
+import Settings from "./pages/Settings";
+import TutorProfile from "./pages/TutorProfile";
+import TutorAvailability from "./pages/TutorAvailability";
+import { ChatbotWidget } from "./components/ChatbotWidget";
 
 function Router() {
   return (
@@ -38,15 +43,19 @@ function Router() {
       <Route path={"/signup"} component={SignUp} />
       <Route path={"/login"} component={Login} />
       <Route path={"/setup-password"} component={SetupPassword} />
+      <Route path={"/forgot-password"} component={ForgotPassword} />
+      <Route path={"/reset-password"} component={ResetPassword} />
       {/* RoleSelection removed - users get role assigned during registration */}
       <Route path={"/tutors"} component={TutorListing} />
       <Route path={"/find-tutors"} component={FindTutors} />
       <Route path={"/tutor-registration"} component={TutorRegistration} />
       {/* Put specific tutor routes before the dynamic :id route to avoid collisions (e.g., /tutor/dashboard) */}
       <Route path={"/tutor/dashboard"} component={TutorDashboard} />
+      <Route path={"/tutor/profile"} component={TutorProfile} />
+      <Route path={"/tutor/availability"} component={TutorAvailability} />
       <Route path={"/tutor/notifications"} component={TutorNotifications} />
       <Route path={"/tutor/payments"} component={TutorPayments} />
-      <Route path={"/tutor-profile/:id"} component={TutorProfile} />
+      <Route path={"/tutor-profile/:id"} component={TutorDetail} />
       <Route path={"/tutor/:id"} component={TutorDetail} />
       <Route path={"/courses"} component={CourseListing} />
       <Route path={"/course/:id"} component={CourseDetail} />
@@ -61,6 +70,7 @@ function Router() {
       <Route path={"/manage-booking/:token"} component={ManageBooking} />
       <Route path={"/session-notes"} component={SessionNotesHistory} />
       <Route path={"/messages"} component={Messages} />
+      <Route path={"/settings"} component={Settings} />
       <Route path={"/404"} component={NotFound} />
       <Route component={NotFound} />
     </Switch>
@@ -74,6 +84,7 @@ function App() {
         <TooltipProvider>
           <Toaster position="bottom-right" />
           <Router />
+          <ChatbotWidget />
         </TooltipProvider>
       </ThemeProvider>
     </ErrorBoundary>

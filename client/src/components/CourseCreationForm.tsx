@@ -1,7 +1,9 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { SelectItem } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import { useValidatedForm } from "@/hooks/useValidatedForm";
@@ -14,6 +16,9 @@ interface CourseCreationFormProps {
 }
 
 export function CourseCreationForm({ onSuccess, editingCourse }: CourseCreationFormProps) {
+  const [aiPowered, setAiPowered] = useState<boolean>(false);
+  const [region, setRegion] = useState<"global" | "us" | "india">("global");
+
   const emptyValues = {
     title: "",
     description: "",
@@ -52,6 +57,8 @@ export function CourseCreationForm({ onSuccess, editingCourse }: CourseCreationF
 
   useEffect(() => {
     reset(initialValues);
+    setAiPowered(editingCourse?.aiPowered ?? false);
+    setRegion(editingCourse?.region ?? "global");
   }, [editingCourse, reset]);
 
   const createMutation = trpc.adminCourses.createCourse.useMutation({
@@ -77,6 +84,8 @@ export function CourseCreationForm({ onSuccess, editingCourse }: CourseCreationF
 
   const resetForm = () => {
     reset(emptyValues);
+    setAiPowered(false);
+    setRegion("global");
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -94,6 +103,8 @@ export function CourseCreationForm({ onSuccess, editingCourse }: CourseCreationF
       sessionsPerWeek: parseInt(values.sessionsPerWeek),
       totalSessions: values.totalSessions ? parseInt(values.totalSessions) : undefined,
       price: values.price,
+      aiPowered,
+      region,
     };
 
     if (editingCourse) {
@@ -221,6 +232,33 @@ export function CourseCreationForm({ onSuccess, editingCourse }: CourseCreationF
             placeholder="Detailed curriculum outline..."
             rows={5}
           />
+
+          <div className="flex items-center gap-6">
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="aiPowered"
+                checked={aiPowered}
+                onCheckedChange={(checked) => setAiPowered(checked === true)}
+              />
+              <Label htmlFor="aiPowered" className="cursor-pointer">
+                AI Powered
+              </Label>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Label className="text-sm font-medium">Region</Label>
+              <Select value={region} onValueChange={(v) => setRegion(v as typeof region)}>
+                <SelectTrigger className="w-36">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="global">🌐 Global</SelectItem>
+                  <SelectItem value="us">🇺🇸 US Only</SelectItem>
+                  <SelectItem value="india">🇮🇳 India Only</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
 
           <div className="flex gap-2">
             <Button

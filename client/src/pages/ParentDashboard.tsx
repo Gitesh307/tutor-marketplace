@@ -1,29 +1,33 @@
 import Navigation from "@/components/Navigation";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
+import { useFormatPrice } from "@/hooks/useFormatPrice";
 import { toast } from "sonner";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Link, useLocation } from "wouter";
-import { BookOpen, Calendar, MessageSquare, CreditCard, Clock, Users, Video, FileText } from "lucide-react";
+import { BookOpen, Calendar, MessageSquare, CreditCard, Clock, Users, Video, FileText, HelpCircle, CheckCircle, TrendingUp, BarChart2, LogIn, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { LOGIN_PATH } from "@/const";
-import { SessionNotesFeed } from "@/components/SessionNotesFeed";
 import { NotificationCenter } from "@/components/NotificationCenter";
 import { ParentBookingsManager } from "@/components/ParentBookingsManager";
 import { ParentSessionsManager } from "@/components/ParentSessionsManager";
 import { AppointmentScheduler } from "@/components/AppointmentScheduler";
+import { ReferralCouponPopup } from "@/components/ReferralCouponPopup";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 export default function ParentDashboard() {
-  const { user, isAuthenticated, loading } = useAuth();
+  const { user, isAuthenticated, loading, previousLastSignedIn } = useAuth();
   const [, setLocation] = useLocation();
+  const formatPrice = useFormatPrice();
   const tabContentClass =
-    "space-y-6 absolute inset-0 w-full transition-all duration-300 data-[state=active]:opacity-100 data-[state=active]:translate-x-0 data-[state=inactive]:opacity-0 data-[state=inactive]:translate-x-4 data-[state=inactive]:pointer-events-none [&[hidden]]:block [&[hidden]]:opacity-0";
+    "space-y-6 w-full transition-all duration-300 data-[state=inactive]:hidden";
 
   const { data: subscriptions, isLoading: subsLoading, refetch: refetchSubscriptions } = trpc.subscription.mySubscriptions.useQuery(
     undefined,
@@ -40,11 +44,50 @@ export default function ParentDashboard() {
     { enabled: isAuthenticated && user?.role === "parent" }
   );
 
-  const { data: sessionNotes, isLoading: notesLoading } = trpc.parentProfile.getSessionNotes.useQuery(
+  const { data: sessionNotes } = trpc.parentProfile.getSessionNotes.useQuery(
     { limit: 50 },
     { enabled: isAuthenticated && user?.role === "parent" }
   );
 
+  const { data: parentQuizzes, refetch: refetchQuizzes } = trpc.quiz.getByParent.useQuery(
+    undefined,
+    { enabled: isAuthenticated && user?.role === "parent" }
+  );
+
+  const { data: parentGrades } = trpc.grades.getByParent.useQuery(
+    undefined,
+    { enabled: isAuthenticated && user?.role === "parent" }
+  );
+
+
+
+
+  type QuizModalState = {
+    quiz: NonNullable<typeof parentQuizzes>[number];
+    answers: Record<number, number>;
+    submitted: boolean;
+    score?: number;
+    correct?: number;
+    total?: number;
+  };
+  const [quizModal, setQuizModal] = useState<QuizModalState | null>(null);
+
+  const setupBillingMutation = trpc.course.getSetupUrl.useMutation();
+  const retryCheckoutMutation = trpc.course.retryCheckout.useMutation();
+  const [setupLoadingId, setSetupLoadingId] = useState<number | null>(null);
+  const [retryLoadingId, setRetryLoadingId] = useState<number | null>(null);
+
+  const completeQuizMutation = trpc.quiz.complete.useMutation({
+    onSuccess: (data) => {
+      setQuizModal((prev) =>
+        prev ? { ...prev, submitted: true, score: data.score, correct: data.correct, total: data.total } : prev
+      );
+      refetchQuizzes();
+    },
+    onError: (error) => {
+      toast.error("Failed to submit quiz: " + error.message);
+    },
+  });
 
   // Track note updates per session to show a small indicator (one-time until next update)
   const lastFeedbackRef = useRef<Map<number, string | null>>(new Map());
@@ -131,6 +174,28 @@ export default function ParentDashboard() {
     }
   }, [loading, isAuthenticated, user, setLocation]);
 
+  // After Stripe Setup Checkout redirect, poll until all pending monthly subs become paid
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("setup") !== "success") return;
+    window.history.replaceState({}, "", window.location.pathname);
+
+    let attempts = 0;
+    const maxAttempts = 10;
+    const interval = setInterval(async () => {
+      attempts++;
+      const result = await refetchSubscriptions();
+      const allResolved = result.data?.every(
+        s => s.subscription.paymentPlan !== "monthly" || s.subscription.paymentStatus !== "pending"
+      );
+      if (allResolved || attempts >= maxAttempts) {
+        clearInterval(interval);
+      }
+    }, 2000); // poll every 2s, up to 20s total
+
+    return () => clearInterval(interval);
+  }, []);
+
   const activeSubscriptions = subscriptions?.filter(s => s.subscription.status === "active") || [];
   const completedSessions = sessionHistory?.filter(s => s.status === "completed") || [];
 
@@ -149,9 +214,6 @@ export default function ParentDashboard() {
 
   const [selectedStudent, setSelectedStudent] = useState<string | null>(null);
   const [selectedSubscriptionStudent, setSelectedSubscriptionStudent] = useState<string>("all");
-  const [selectedNoteStudent, setSelectedNoteStudent] = useState<string>("all");
-  const [selectedSubject, setSelectedSubject] = useState<string>("all");
-  const [selectedTimeFilter, setSelectedTimeFilter] = useState<string>("all");
   const [selectedHistoryStudent, setSelectedHistoryStudent] = useState<string>("all");
   const [selectedHistoryTime, setSelectedHistoryTime] = useState<string>("all");
   const [selectedHistoryCourse, setSelectedHistoryCourse] = useState<string>("all");
@@ -235,40 +297,6 @@ export default function ParentDashboard() {
     return Array.from(set);
   }, [combinedNotes, activeSubscriptions]);
 
-  const filteredSessionNotes = useMemo(() => {
-    const now = new Date();
-    const currentMonth = now.getMonth();
-    const currentYear = now.getFullYear();
-
-    return combinedNotes.filter((note) => {
-      const studentName =
-        [note.studentFirstName, note.studentLastName].filter(Boolean).join(" ").trim() ||
-        (note.subscriptionId ? subscriptionStudentMap.get(note.subscriptionId) ?? "" : "");
-      const subject = note.courseTitle || note.courseSubject || "";
-
-      const matchesStudent = selectedNoteStudent === "all" || studentName === selectedNoteStudent;
-      const matchesSubject = selectedSubject === "all" || subject === selectedSubject;
-
-      // Time filter logic
-      let matchesTime = true;
-      if (selectedTimeFilter !== "all") {
-        const noteDate = new Date(note.scheduledAt);
-        const noteMonth = noteDate.getMonth();
-        const noteYear = noteDate.getFullYear();
-
-        if (selectedTimeFilter === "this_month") {
-          matchesTime = noteMonth === currentMonth && noteYear === currentYear;
-        } else if (selectedTimeFilter === "last_month") {
-          const lastMonth = currentMonth === 0 ? 11 : currentMonth - 1;
-          const lastMonthYear = currentMonth === 0 ? currentYear - 1 : currentYear;
-          matchesTime = noteMonth === lastMonth && noteYear === lastMonthYear;
-        }
-      }
-
-      return matchesStudent && matchesSubject && matchesTime;
-    });
-  }, [combinedNotes, selectedNoteStudent, selectedSubject, selectedTimeFilter, subscriptionStudentMap]);
-
   // Filtered history sessions
   const filteredHistorySessions = useMemo(() => {
     if (!sessionHistory) return [];
@@ -316,6 +344,39 @@ export default function ParentDashboard() {
     });
   }, [activeSubscriptions, selectedSubscriptionStudent]);
 
+  // Map sessionId -> structured note for quick lookup in history
+  const noteBySessionId = useMemo(() => {
+    const map = new Map<number, NonNullable<typeof sessionNotes>[number]>();
+    (sessionNotes || []).forEach((note) => {
+      if (note.sessionId) map.set(note.sessionId, note);
+    });
+    return map;
+  }, [sessionNotes]);
+
+  // Map sessionId -> quiz for quick lookup in history
+  const quizBySessionId = useMemo(() => {
+    const map = new Map<number, NonNullable<typeof parentQuizzes>[number]>();
+    (parentQuizzes || []).forEach((q) => map.set(q.sessionId, q));
+    return map;
+  }, [parentQuizzes]);
+
+  // Map sessionId -> rubric grade for quick lookup in history
+  const gradeBySessionId = useMemo(() => {
+    const map = new Map<number, NonNullable<typeof parentGrades>[number]>();
+    (parentGrades || []).forEach((g) => { if (g.sessionId) map.set(g.sessionId, g); });
+    return map;
+  }, [parentGrades]);
+
+  // Track which session grade cards are expanded to show evidence
+  const [expandedGrades, setExpandedGrades] = useState<Set<number>>(new Set());
+  const toggleGradeExpand = (sessionId: number) => {
+    setExpandedGrades((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) next.delete(sessionId); else next.add(sessionId);
+      return next;
+    });
+  };
+
   // Filter subscriptions by selected student for the Schedule tab
   const filteredSubscriptions =
     selectedStudent
@@ -324,6 +385,61 @@ export default function ParentDashboard() {
           return name === selectedStudent;
         })
       : [];
+
+  // Analytics computations
+  const analyticsStats = useMemo(() => {
+    const allSessions = sessionHistory || [];
+    const completed = allSessions.filter(s => s.status === "completed");
+    const noShows = allSessions.filter(s => s.status === "no_show");
+    const totalScheduled = allSessions.filter(s => s.status === "completed" || s.status === "no_show" || s.status === "scheduled");
+    const attendanceRate = totalScheduled.length > 0 ? Math.round((completed.length / totalScheduled.length) * 100) : 0;
+    const totalMinutes = completed.reduce((sum, s) => sum + (s.duration || 0), 0);
+
+    // Per-student breakdown
+    const studentMap = new Map<string, { sessions: number; lastSession: number | null; quizScores: number[] }>();
+    completed.forEach((s) => {
+      const name = [s.studentFirstName, s.studentLastName].filter(Boolean).join(" ").trim() || "Student";
+      if (!studentMap.has(name)) studentMap.set(name, { sessions: 0, lastSession: null, quizScores: [] });
+      const entry = studentMap.get(name)!;
+      entry.sessions += 1;
+      if (entry.lastSession === null || s.scheduledAt > entry.lastSession) entry.lastSession = s.scheduledAt;
+    });
+    (parentQuizzes || []).filter(q => q.status === "completed" && q.score != null).forEach((q) => {
+      const session = allSessions.find(s => s.id === q.sessionId);
+      if (!session) return;
+      const name = [session.studentFirstName, session.studentLastName].filter(Boolean).join(" ").trim() || "Student";
+      if (studentMap.has(name)) studentMap.get(name)!.quizScores.push(q.score!);
+    });
+
+    // Monthly sessions (last 6 months)
+    const now = new Date();
+    const months: { label: string; count: number }[] = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const label = d.toLocaleDateString(undefined, { month: "short", year: "numeric" });
+      const count = completed.filter(s => {
+        const sd = new Date(s.scheduledAt);
+        return sd.getMonth() === d.getMonth() && sd.getFullYear() === d.getFullYear();
+      }).length;
+      months.push({ label, count });
+    }
+
+    const completedQuizzes = (parentQuizzes || []).filter(q => q.status === "completed");
+    const avgQuizScore = completedQuizzes.length > 0
+      ? Math.round(completedQuizzes.reduce((sum, q) => sum + (q.score ?? 0), 0) / completedQuizzes.length)
+      : null;
+
+    return {
+      totalCompleted: completed.length,
+      noShowCount: noShows.length,
+      attendanceRate,
+      totalHours: Math.round(totalMinutes / 60 * 10) / 10,
+      studentBreakdown: Array.from(studentMap.entries()).map(([name, data]) => ({ name, ...data })),
+      monthlyActivity: months,
+      completedQuizzes: completedQuizzes.length,
+      avgQuizScore,
+    };
+  }, [sessionHistory, parentQuizzes]);
 
   if (loading || !isAuthenticated) {
     return (
@@ -336,6 +452,8 @@ export default function ParentDashboard() {
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <Navigation />
+
+      <ReferralCouponPopup />
 
       <div className="flex-1 mt-20">
         {/* Header */}
@@ -431,11 +549,11 @@ export default function ParentDashboard() {
                 >
                   History
                 </TabsTrigger>
-                <TabsTrigger className="whitespace-nowrap" value="notes">Notes</TabsTrigger>
+                <TabsTrigger className="whitespace-nowrap" value="analytics">Analytics</TabsTrigger>
               </TabsList>
             </div>
 
-            <div className="relative min-h-[540px]">
+            <div>
             {/* Subscriptions Tab */}
             <TabsContent value="subscriptions" forceMount className={tabContentClass}>
               <div className="flex items-center justify-between">
@@ -488,7 +606,7 @@ export default function ParentDashboard() {
                     </Card>
                   ) : (
                     <div className="grid md:grid-cols-2 gap-6">
-                      {filteredSubscriptionsForTab.map(({ subscription, course, tutor, sessionStats }) => {
+                      {filteredSubscriptionsForTab.map(({ subscription, course, tutor, sessionStats, nextBillingDate, nextBillingAmount }: any) => {
                         // Calculate session progress
                         const totalSessions = course.totalSessions || 0;
                         const completedCount = sessionStats?.completedCount || 0;
@@ -496,7 +614,7 @@ export default function ParentDashboard() {
                         const remainingSessions = totalSessions - completedCount - scheduledCount;
 
                         return (
-                    <Card key={subscription.id} className="hover:shadow-elegant transition-all">
+                    <Card key={subscription.id} className="hover:shadow-elegant transition-all flex flex-col">
                       <CardHeader>
                         <div className="flex items-start justify-between">
                           <div className="flex-1">
@@ -515,30 +633,25 @@ export default function ParentDashboard() {
                             <Badge variant={subscription.status === "active" ? "default" : "secondary"}>
                               {subscription.status}
                             </Badge>
-                            {subscription.paymentStatus === "pending" && subscription.paymentPlan === "full" && (
+                            {subscription.paymentStatus === "pending" && (subscription.paymentPlan === "full" || subscription.paymentPlan === "installment") && (
                               <Badge variant="destructive" className="text-xs">
                                 Billing Pending
                               </Badge>
                             )}
-                            {subscription.paymentPlan === "installment" && (
-                              <Badge variant="outline" className="text-xs">
-                                Installment Plan
-                              </Badge>
-                            )}
-                            {subscription.paymentPlan === "installment" && subscription.firstInstallmentPaid && !subscription.secondInstallmentPaid && (
+                            {subscription.paymentPlan === "monthly" && subscription.paymentStatus === "pending" && (
                               <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200">
-                                2nd Installment Due
+                                Payment Pending
                               </Badge>
                             )}
-                            {subscription.paymentPlan === "installment" && subscription.firstInstallmentPaid && subscription.secondInstallmentPaid && (
+                            {subscription.paymentPlan === "monthly" && subscription.paymentStatus === "paid" && (
                               <Badge variant="secondary" className="text-xs bg-green-100 text-green-900 dark:bg-green-950 dark:text-green-200">
-                                Fully Paid
+                                Monthly Billing Active
                               </Badge>
                             )}
                           </div>
                         </div>
                       </CardHeader>
-                      <CardContent className="space-y-4">
+                      <CardContent className="space-y-4 flex flex-col flex-1">
                         <div className="grid grid-cols-2 gap-4 text-sm">
                           <div>
                             <p className="text-muted-foreground">Started</p>
@@ -555,83 +668,90 @@ export default function ParentDashboard() {
                           </div>
                         </div>
 
-                        {subscription.paymentStatus === "pending" && subscription.paymentPlan === "full" && (
+                        {subscription.paymentPlan === "monthly" && subscription.paymentStatus === "paid" && !!nextBillingDate && !isNaN(nextBillingDate) && (
+                          <div className="p-3 bg-blue-50 dark:bg-blue-950/20 rounded-lg border border-blue-200 dark:border-blue-900 text-sm">
+                            <div className="flex justify-between items-center">
+                              <span className="text-blue-800 dark:text-blue-200">Next billing</span>
+                              <span className="font-medium text-blue-900 dark:text-blue-100">
+                                {new Date(nextBillingDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                                {nextBillingAmount != null && (
+                                  <span className="ml-2">{formatPrice(nextBillingAmount as number)}</span>
+                                )}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
+                        {subscription.paymentStatus === "pending" && subscription.paymentPlan === "monthly" && (
                           <div className="p-3 bg-amber-50 dark:bg-amber-950/20 rounded-lg border border-amber-200 dark:border-amber-900">
                             <p className="text-sm text-amber-900 dark:text-amber-200 mb-2">
-                              Complete your billing to access all course features
+                              Add your payment method to activate monthly billing
                             </p>
                             <Button
                               size="sm"
                               className="w-full"
+                              disabled={setupLoadingId === subscription.id}
                               onClick={async () => {
                                 try {
-                                  const result = await trpc.course.createCheckoutSession.useMutation().mutateAsync({
-                                    courseId: course.id,
-                                    studentFirstName: subscription.studentFirstName || "",
-                                    studentLastName: subscription.studentLastName || "",
-                                    studentGrade: subscription.studentGrade || "",
+                                  setSetupLoadingId(subscription.id);
+                                  const result = await setupBillingMutation.mutateAsync({
+                                    subscriptionId: subscription.id,
+                                    origin: window.location.origin,
                                   });
-                                  if (result?.success) {
-                                    toast.success("Payment recorded as paid.");
-                                    window.location.reload();
-                                  } else if ((result as any)?.checkoutUrl) {
-                                    window.open((result as any).checkoutUrl, "_blank");
+                                  if (result?.setupUrl) {
+                                    window.open(result.setupUrl, "_blank");
+                                  } else {
+                                    toast.error("Could not create billing setup. Please contact support.");
                                   }
                                 } catch (error) {
-                                  toast.error("Failed to create payment session");
+                                  toast.error("Failed to set up billing");
+                                } finally {
+                                  setSetupLoadingId(null);
                                 }
                               }}
                             >
                               <CreditCard className="w-4 h-4 mr-2" />
-                              Pay Now
+                              {setupLoadingId === subscription.id ? "Setting up..." : "Set Up Monthly Billing"}
                             </Button>
                           </div>
                         )}
 
-                        {subscription.paymentPlan === "installment" && (
-                          <div className="p-3 bg-blue-50 dark:bg-blue-950/20 rounded-lg border border-blue-200 dark:border-blue-900 space-y-2">
-                            <p className="text-sm font-medium text-blue-900 dark:text-blue-200">
-                              💳 Installment Billing Plan
+                        {subscription.paymentStatus === "pending" && (subscription.paymentPlan === "full" || subscription.paymentPlan === "installment") && (
+                          <div className="p-3 bg-red-50 dark:bg-red-950/20 rounded-lg border border-red-200 dark:border-red-900">
+                            <p className="text-sm text-red-900 dark:text-red-200 mb-2">
+                              Payment is required to activate this enrollment.
                             </p>
-                            <div className="space-y-1 text-xs text-blue-800 dark:text-blue-300">
-                              <div className="flex justify-between">
-                                <span>First Installment ({subscription.firstInstallmentAmount ? `$${subscription.firstInstallmentAmount}` : 'N/A'}):</span>
-                                <span className={subscription.firstInstallmentPaid ? "text-green-600 dark:text-green-400 font-medium" : "text-amber-600 dark:text-amber-400"}>
-                                  {subscription.firstInstallmentPaid ? "✓ Paid" : "Pending"}
-                                </span>
-                              </div>
-                              <div className="flex justify-between">
-                                <span>Second Installment ({subscription.secondInstallmentAmount ? `$${subscription.secondInstallmentAmount}` : 'N/A'}):</span>
-                                <span className={subscription.secondInstallmentPaid ? "text-green-600 dark:text-green-400 font-medium" : "text-amber-600 dark:text-amber-400"}>
-                                  {subscription.secondInstallmentPaid ? "✓ Paid" : "Pending"}
-                                </span>
-                              </div>
-                            </div>
-                            {subscription.firstInstallmentPaid && !subscription.secondInstallmentPaid && (
-                              <Button
-                                size="sm"
-                                className="w-full mt-2"
-                                onClick={async () => {
-                                  try {
-                                    const { checkoutUrl } = await trpc.payment.processSecondInstallment.useMutation().mutateAsync({
-                                      subscriptionId: subscription.id,
-                                    });
-                                    if (checkoutUrl) {
-                                      window.open(checkoutUrl, "_blank");
-                                    }
-                                  } catch (error) {
-                                    toast.error("Failed to create payment session");
+                            <Button
+                              size="sm"
+                              className="w-full"
+                              disabled={retryLoadingId === subscription.id}
+                              onClick={async () => {
+                                try {
+                                  setRetryLoadingId(subscription.id);
+                                  const result = await retryCheckoutMutation.mutateAsync({
+                                    subscriptionId: subscription.id,
+                                    origin: window.location.origin,
+                                  });
+                                  if (result?.checkoutUrl) {
+                                    window.open(result.checkoutUrl, "_blank");
+                                  } else {
+                                    toast.error("Could not create payment session. Please contact support.");
                                   }
-                                }}
-                              >
-                                <CreditCard className="w-4 h-4 mr-2" />
-                                Pay Second Installment
-                              </Button>
-                            )}
+                                } catch (error: any) {
+                                  toast.error(error?.message || "Failed to initiate payment");
+                                } finally {
+                                  setRetryLoadingId(null);
+                                }
+                              }}
+                            >
+                              <CreditCard className="w-4 h-4 mr-2" />
+                              {retryLoadingId === subscription.id ? "Redirecting..." : "Complete Payment"}
+                            </Button>
                           </div>
                         )}
 
-                        <div className="space-y-2">
+
+                        <div className="space-y-2 mt-auto">
                           {subscription.status === "active" && subscription.paymentStatus === "paid" && (
                             <Button
                               size="sm"
@@ -842,6 +962,184 @@ export default function ParentDashboard() {
                               </div>
                             </div>
                           )}
+
+                          {noteBySessionId.has(session.id) && (() => {
+                            const n = noteBySessionId.get(session.id)!;
+                            const hasExtra = n.homework || n.challenges || n.nextSteps;
+                            if (!hasExtra) return null;
+                            return (
+                              <div className="mt-3 p-4 rounded-xl border-l-4 border-blue-400 bg-gradient-to-br from-blue-50 to-blue-100/40 dark:from-blue-950/20 dark:to-blue-900/10 space-y-2">
+                                {n.homework && (
+                                  <div>
+                                    <p className="text-xs font-semibold text-blue-800 dark:text-blue-200 uppercase tracking-wide mb-0.5">Homework</p>
+                                    <p className="text-sm text-blue-900 dark:text-blue-50 leading-relaxed whitespace-pre-wrap">{n.homework}</p>
+                                  </div>
+                                )}
+                                {n.challenges && (
+                                  <div>
+                                    <p className="text-xs font-semibold text-blue-800 dark:text-blue-200 uppercase tracking-wide mb-0.5">Challenges</p>
+                                    <p className="text-sm text-blue-900 dark:text-blue-50 leading-relaxed whitespace-pre-wrap">{n.challenges}</p>
+                                  </div>
+                                )}
+                                {n.nextSteps && (
+                                  <div>
+                                    <p className="text-xs font-semibold text-blue-800 dark:text-blue-200 uppercase tracking-wide mb-0.5">Next Steps</p>
+                                    <p className="text-sm text-blue-900 dark:text-blue-50 leading-relaxed whitespace-pre-wrap">{n.nextSteps}</p>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+
+                          {quizBySessionId.has(session.id) && (
+                            <div className="mt-3">
+                              {quizBySessionId.get(session.id)!.status === "completed" ? (
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  {(() => {
+                                    const s = quizBySessionId.get(session.id)!.score;
+                                    const c = s == null || s >= 70 ? "text-green-600 dark:text-green-400" : s >= 40 ? "text-orange-500 dark:text-orange-400" : "text-red-600 dark:text-red-400";
+                                    return (
+                                      <div className={`flex items-center gap-1.5 text-sm ${c}`}>
+                                        <CheckCircle className="w-4 h-4" />
+                                        <span>Quiz completed</span>
+                                        {s != null && <span className="font-semibold">· {s}%</span>}
+                                      </div>
+                                    );
+                                  })()}
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground"
+                                    onClick={() => {
+                                      const q = quizBySessionId.get(session.id)!;
+                                      const storedAnswers: Record<number, number> = q.studentAnswers
+                                        ? (JSON.parse(q.studentAnswers) as number[]).reduce((acc, ans, idx) => ({ ...acc, [idx]: ans }), {})
+                                        : {};
+                                      setQuizModal({ quiz: q, answers: storedAnswers, submitted: true, score: q.score ?? undefined, correct: q.correctCount ?? undefined, total: q.totalCount ?? undefined });
+                                    }}
+                                  >
+                                    View Results
+                                  </Button>
+                                </div>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="border-violet-500 text-violet-700 hover:bg-violet-50 dark:text-violet-300 dark:border-violet-700"
+                                  onClick={() => {
+                                    const q = quizBySessionId.get(session.id)!;
+                                    setQuizModal({ quiz: q, answers: {}, submitted: false });
+                                  }}
+                                >
+                                  <HelpCircle className="w-3 h-3 mr-1" />
+                                  Take Quiz
+                                </Button>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Session Grade */}
+                          {gradeBySessionId.has(session.id) && (() => {
+                            const g = gradeBySessionId.get(session.id)!;
+                            const score = g.rubricOverallScore;
+                            const isExpanded = expandedGrades.has(session.id);
+                            const evidence: { criterion: string; score: number; evidence: string }[] = Array.isArray(g.rubricEvidence) ? g.rubricEvidence : [];
+                            const scoreLabel = score == null ? null : score >= 3.5 ? "Excellent" : score >= 2.5 ? "Proficient" : score >= 1.5 ? "Developing" : "Needs Support";
+                            const scoreBg = score == null ? "bg-muted" : score >= 3.5 ? "bg-emerald-500" : score >= 2.5 ? "bg-blue-500" : score >= 1.5 ? "bg-amber-400" : "bg-red-500";
+                            const scoreText = score == null ? "text-muted-foreground" : score >= 3.5 ? "text-emerald-600 dark:text-emerald-400" : score >= 2.5 ? "text-blue-600 dark:text-blue-400" : score >= 1.5 ? "text-amber-500 dark:text-amber-400" : "text-red-500 dark:text-red-400";
+                            return (
+                              <div className="mt-4 rounded-xl border border-border/60 overflow-hidden shadow-sm">
+                                {/* Header bar */}
+                                <div className="flex items-center justify-between px-4 py-2.5 bg-gradient-to-r from-violet-50 to-indigo-50 dark:from-violet-950/30 dark:to-indigo-950/30 border-b border-border/50">
+                                  <div className="flex items-center gap-2">
+                                    <Sparkles className="w-3.5 h-3.5 text-violet-500" />
+                                    <span className="text-xs font-semibold text-violet-700 dark:text-violet-300 uppercase tracking-wide">Teaching Quality</span>
+                                  </div>
+                                  <button
+                                    onClick={() => toggleGradeExpand(session.id)}
+                                    className="flex items-center gap-1 text-xs text-violet-600 dark:text-violet-400 hover:text-violet-800 dark:hover:text-violet-200 font-medium transition-colors"
+                                  >
+                                    {isExpanded ? "Hide details" : "View details"}
+                                    <svg className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
+                                  </button>
+                                </div>
+
+                                <div className="px-4 py-3 space-y-3 bg-background">
+                                  {/* Score summary row */}
+                                  <div className="flex items-center gap-3">
+                                    <div className="flex items-center gap-2 flex-1">
+                                      <div className="relative w-10 h-10 shrink-0">
+                                        <svg viewBox="0 0 36 36" className="w-10 h-10 -rotate-90">
+                                          <circle cx="18" cy="18" r="15" fill="none" stroke="currentColor" strokeWidth="3" className="text-muted/40" />
+                                          <circle cx="18" cy="18" r="15" fill="none" stroke="currentColor" strokeWidth="3"
+                                            strokeDasharray={`${((score ?? 0) / 4) * 94.2} 94.2`}
+                                            strokeLinecap="round"
+                                            className={score == null ? "text-muted" : score >= 3.5 ? "text-emerald-500" : score >= 2.5 ? "text-blue-500" : score >= 1.5 ? "text-amber-400" : "text-red-500"}
+                                          />
+                                        </svg>
+                                        <span className={`absolute inset-0 flex items-center justify-center text-[10px] font-bold ${scoreText}`}>
+                                          {score != null ? score.toFixed(1) : "—"}
+                                        </span>
+                                      </div>
+                                      <div>
+                                        <p className={`text-sm font-bold ${scoreText}`}>{scoreLabel ?? "—"}</p>
+                                        <p className="text-xs text-muted-foreground">out of 4.0</p>
+                                      </div>
+                                    </div>
+                                    {/* Mini score pills */}
+                                    <div className="flex gap-1.5 flex-wrap justify-end">
+                                      {evidence.map((e) => {
+                                        const pill = e.score === 4 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300" : e.score === 3 ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300" : e.score === 2 ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300" : "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300";
+                                        const short = e.criterion.split(" ")[0];
+                                        return (
+                                          <span key={e.criterion} className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${pill}`} title={e.criterion}>
+                                            {short} {e.score}/4
+                                          </span>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+
+                                  {/* Expanded detail */}
+                                  {isExpanded && (
+                                    <div className="space-y-2.5 pt-1 border-t border-border/40">
+                                      {evidence.map((e) => {
+                                        const bar = e.score === 4 ? "bg-emerald-500" : e.score === 3 ? "bg-blue-500" : e.score === 2 ? "bg-amber-400" : "bg-red-500";
+                                        const label = e.score === 4 ? "Excellent" : e.score === 3 ? "Proficient" : e.score === 2 ? "Developing" : "Support";
+                                        return (
+                                          <div key={e.criterion} className="space-y-1">
+                                            <div className="flex items-center justify-between gap-2">
+                                              <span className="text-xs font-medium truncate flex-1">{e.criterion}</span>
+                                              <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${e.score === 4 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300" : e.score === 3 ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300" : e.score === 2 ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300" : "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"}`}>{e.score}/4 · {label}</span>
+                                            </div>
+                                            <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
+                                              <div className={`h-1.5 rounded-full ${bar} transition-all`} style={{ width: `${(e.score / 4) * 100}%` }} />
+                                            </div>
+                                            {e.evidence && (
+                                              <p className="text-xs text-muted-foreground italic leading-relaxed border-l-2 border-muted pl-2">"{e.evidence}"</p>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+
+                                  {/* Quality warning */}
+                                  {g.rubricTranscriptQuality === "low" && (
+                                    <div className="flex items-start gap-1.5 rounded-md bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 px-2.5 py-1.5">
+                                      <span className="text-amber-500 shrink-0 text-xs mt-0.5">⚠️</span>
+                                      <p className="text-xs text-amber-700 dark:text-amber-400">Grade may be inaccurate — {g.rubricTranscriptQualityReason || "transcript had audio gaps"}</p>
+                                    </div>
+                                  )}
+
+                                  {/* Footer note */}
+                                  <p className="text-[10px] text-muted-foreground/70 italic border-t border-border/30 pt-2">
+                                    AI-assisted quality signal based on session transcript. Scores reflect observable teaching behaviors only.
+                                  </p>
+                                </div>
+                              </div>
+                            );
+                          })()}
                           </div>
                         </div>
                       </CardContent>
@@ -861,68 +1159,268 @@ export default function ParentDashboard() {
               )}
             </TabsContent>
 
-            {/* Session Notes Tab */}
-            <TabsContent value="notes" forceMount className={tabContentClass}>
-              <h2 className="text-2xl font-bold">Session Notes</h2>
+            {/* Analytics Tab */}
+            <TabsContent value="analytics" forceMount className={tabContentClass}>
+              {/* Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div>
+                  <h2 className="text-2xl font-bold">Learning Analytics</h2>
+                  <p className="text-sm text-muted-foreground mt-0.5">Overview of your child's progress and activity</p>
+                </div>
+                {previousLastSignedIn && (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/60 rounded-lg px-3 py-2 self-start sm:self-auto">
+                    <LogIn className="w-3.5 h-3.5 shrink-0" />
+                    <span>Last login: <span className="font-medium text-foreground">{new Date(previousLastSignedIn).toLocaleString()}</span></span>
+                  </div>
+                )}
+              </div>
 
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 mt-4">
-                <div className="space-y-2">
-                  <Label htmlFor="note-student">Student</Label>
-                  <Select value={selectedNoteStudent} onValueChange={setSelectedNoteStudent}>
-                    <SelectTrigger id="note-student">
-                      <SelectValue placeholder="All students" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All students</SelectItem>
-                      {noteStudentOptions.map((name) => (
-                        <SelectItem key={name} value={name}>{name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+              {/* Stat Cards */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-2">
+                {/* Sessions Completed */}
+                <div className="rounded-2xl bg-gradient-to-br from-blue-500 to-blue-600 p-5 text-white shadow-md">
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-xs font-medium uppercase tracking-wider opacity-80">Sessions Done</p>
+                    <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center">
+                      <CheckCircle className="w-4 h-4" />
+                    </div>
+                  </div>
+                  <p className="text-4xl font-bold">{analyticsStats.totalCompleted}</p>
+                  <p className="text-xs opacity-70 mt-1">completed sessions</p>
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="note-time">Time Period</Label>
-                  <Select value={selectedTimeFilter} onValueChange={setSelectedTimeFilter}>
-                    <SelectTrigger id="note-time">
-                      <SelectValue placeholder="All time" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All time</SelectItem>
-                      <SelectItem value="this_month">This month</SelectItem>
-                      <SelectItem value="last_month">Last month</SelectItem>
-                    </SelectContent>
-                  </Select>
+                {/* Attendance Rate */}
+                <div className={`rounded-2xl p-5 text-white shadow-md bg-gradient-to-br ${analyticsStats.attendanceRate >= 80 ? "from-emerald-500 to-emerald-600" : analyticsStats.attendanceRate >= 60 ? "from-orange-400 to-orange-500" : "from-red-500 to-red-600"}`}>
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-xs font-medium uppercase tracking-wider opacity-80">Attendance</p>
+                    <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center">
+                      <TrendingUp className="w-4 h-4" />
+                    </div>
+                  </div>
+                  <p className="text-4xl font-bold">{analyticsStats.attendanceRate}%</p>
+                  <p className="text-xs opacity-70 mt-1">{analyticsStats.attendanceRate >= 80 ? "excellent" : analyticsStats.attendanceRate >= 60 ? "needs improvement" : "low attendance"}</p>
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="note-subject">Course</Label>
-                  <Select value={selectedSubject} onValueChange={setSelectedSubject}>
-                    <SelectTrigger id="note-subject">
-                      <SelectValue placeholder="All courses" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All courses</SelectItem>
-                      {subjectOptions.map((subject) => (
-                        <SelectItem key={subject} value={subject}>{subject}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                {/* Total Hours */}
+                <div className="rounded-2xl bg-gradient-to-br from-violet-500 to-violet-600 p-5 text-white shadow-md">
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-xs font-medium uppercase tracking-wider opacity-80">Total Hours</p>
+                    <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center">
+                      <Clock className="w-4 h-4" />
+                    </div>
+                  </div>
+                  <p className="text-4xl font-bold">{analyticsStats.totalHours}</p>
+                  <p className="text-xs opacity-70 mt-1">hours of learning</p>
+                </div>
+
+                {/* Avg Quiz Score */}
+                <div className={`rounded-2xl p-5 text-white shadow-md bg-gradient-to-br ${analyticsStats.avgQuizScore == null ? "from-slate-400 to-slate-500" : analyticsStats.avgQuizScore >= 70 ? "from-teal-500 to-teal-600" : analyticsStats.avgQuizScore >= 40 ? "from-amber-400 to-amber-500" : "from-rose-500 to-rose-600"}`}>
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-xs font-medium uppercase tracking-wider opacity-80">Avg Quiz Score</p>
+                    <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center">
+                      <HelpCircle className="w-4 h-4" />
+                    </div>
+                  </div>
+                  <p className="text-4xl font-bold">{analyticsStats.avgQuizScore != null ? `${analyticsStats.avgQuizScore}%` : "—"}</p>
+                  <p className="text-xs opacity-70 mt-1">{analyticsStats.avgQuizScore != null ? `${analyticsStats.completedQuizzes} quiz${analyticsStats.completedQuizzes !== 1 ? "zes" : ""} taken` : "no quizzes yet"}</p>
                 </div>
               </div>
 
-              {notesLoading ? (
-                <Skeleton className="h-32" />
-              ) : sessionNotes && sessionNotes.length > 0 ? (
-                <SessionNotesFeed notes={filteredSessionNotes} />
-              ) : (
-                <Card className="mt-6">
-                  <CardContent className="py-16 text-center">
-                    <FileText className="w-16 h-16 mx-auto mb-4 text-muted-foreground" />
-                    <h3 className="text-xl font-semibold mb-2">No notes yet</h3>
-                    <p className="text-muted-foreground">Your tutor's session notes will appear here.</p>
-                  </CardContent>
-                </Card>
+              <div className="grid md:grid-cols-2 gap-6">
+                {/* Monthly Activity */}
+                <div className="flex flex-col">
+                  <h3 className="text-base font-semibold flex items-center gap-2 mb-3">
+                    <BarChart2 className="w-4 h-4 text-primary" /> Monthly Activity
+                  </h3>
+                  <div className="rounded-xl border bg-card shadow-sm p-5 space-y-3 flex-1">
+                    {analyticsStats.monthlyActivity.every(m => m.count === 0) ? (
+                      <div className="flex flex-col items-center justify-center h-full min-h-[180px] text-muted-foreground gap-2">
+                        <BarChart2 className="w-8 h-8 opacity-30" />
+                        <p className="text-sm">No session data yet</p>
+                      </div>
+                    ) : (
+                      <>
+                        {(() => {
+                          const max = Math.max(...analyticsStats.monthlyActivity.map(m => m.count), 1);
+                          return analyticsStats.monthlyActivity.map(({ label, count }) => (
+                            <div key={label} className="flex items-center gap-3 text-sm">
+                              <span className="w-20 text-muted-foreground shrink-0 text-xs">{label}</span>
+                              <div className="flex-1 bg-muted rounded-full h-2.5 overflow-hidden">
+                                <div
+                                  className="h-2.5 rounded-full bg-gradient-to-r from-blue-500 to-violet-500 transition-all duration-500"
+                                  style={{ width: `${(count / max) * 100}%` }}
+                                />
+                              </div>
+                              <span className="w-5 text-right font-semibold text-xs">{count}</span>
+                            </div>
+                          ));
+                        })()}
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* No-show + quick summary */}
+                <div className="flex flex-col">
+                  <h3 className="text-base font-semibold flex items-center gap-2 mb-3">
+                    <TrendingUp className="w-4 h-4 text-primary" /> Session Summary
+                  </h3>
+                  <div className="rounded-xl border bg-card shadow-sm divide-y flex-1">
+                    <div className="flex items-center justify-between px-5 py-3.5">
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 shrink-0" />
+                        Completed
+                      </div>
+                      <span className="font-semibold text-emerald-600 dark:text-emerald-400">{analyticsStats.totalCompleted}</span>
+                    </div>
+                    <div className="flex items-center justify-between px-5 py-3.5">
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <div className="w-2.5 h-2.5 rounded-full bg-blue-500 shrink-0" />
+                        Scheduled
+                      </div>
+                      <span className="font-semibold text-blue-600 dark:text-blue-400">
+                        {(subscriptions || []).reduce((sum, s) => sum + (s.sessionStats?.scheduledCount ?? 0), 0)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between px-5 py-3.5">
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <div className="w-2.5 h-2.5 rounded-full bg-red-400 shrink-0" />
+                        No-shows
+                      </div>
+                      <span className={`font-semibold ${analyticsStats.noShowCount > 0 ? "text-red-500" : "text-muted-foreground"}`}>
+                        {analyticsStats.noShowCount}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between px-5 py-3.5">
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <div className="w-2.5 h-2.5 rounded-full bg-violet-500 shrink-0" />
+                        Active Enrollments
+                      </div>
+                      <span className="font-semibold text-violet-600 dark:text-violet-400">
+                        {(subscriptions || []).filter(s => s.subscription.status === "active").length}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Teaching Quality */}
+              {parentGrades && parentGrades.length > 0 && (() => {
+                const criteria = [
+                  { key: "rubricAcademicEfficiency", label: "Academic Efficiency" },
+                  { key: "rubricInstructionalQuality", label: "Instructional Quality" },
+                  { key: "rubricStrategyInsight", label: "Strategy & Insight" },
+                  { key: "rubricSynthesisBranding", label: "Synthesis & Branding" },
+                ] as const;
+                const gradedRows = parentGrades.filter(g => g.rubricOverallScore != null);
+                const avgFor = (key: string) => {
+                  const vals = gradedRows.map(g => (g as any)[key]).filter((v: any) => v != null) as number[];
+                  return vals.length > 0 ? (vals.reduce((a, b) => a + b, 0) / vals.length) : null;
+                };
+                const scoreColor = (v: number | null) => v == null ? "bg-muted" : v >= 3.5 ? "bg-emerald-500" : v >= 2.5 ? "bg-blue-500" : v >= 1.5 ? "bg-amber-400" : "bg-red-500";
+                const scoreText = (v: number | null) => v == null ? "text-muted-foreground" : v >= 3.5 ? "text-emerald-600 dark:text-emerald-400" : v >= 2.5 ? "text-blue-600 dark:text-blue-400" : v >= 1.5 ? "text-amber-500" : "text-red-600 dark:text-red-400";
+                return (
+                  <div>
+                    <h3 className="text-base font-semibold flex items-center gap-2 mb-3">
+                      <Sparkles className="w-4 h-4 text-primary" /> Teaching Quality
+                    </h3>
+                    <div className="grid md:grid-cols-2 gap-6">
+                      {/* Avg scores card */}
+                      <div className="rounded-xl border bg-card shadow-sm flex-1">
+                        <div className="px-5 pt-4 pb-5 space-y-3">
+                          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Avg Rubric Scores ({gradedRows.length} session{gradedRows.length !== 1 ? "s" : ""} graded)</p>
+                          {criteria.map(({ key, label }) => {
+                            const avg = avgFor(key);
+                            return (
+                              <div key={key} className="flex items-center gap-3">
+                                <span className="text-xs text-muted-foreground w-36 shrink-0">{label}</span>
+                                <div className="flex-1 bg-muted rounded-full h-2 overflow-hidden">
+                                  <div className={`h-2 rounded-full ${scoreColor(avg)} transition-all`} style={{ width: avg ? `${(avg / 4) * 100}%` : "0%" }} />
+                                </div>
+                                <span className={`text-xs font-semibold w-8 text-right ${scoreText(avg)}`}>{avg != null ? avg.toFixed(1) : "—"}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Score trend card */}
+                      <div className="rounded-xl border bg-card shadow-sm flex-1">
+                        <div className="px-5 pt-4 pb-5 space-y-3">
+                          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Score Trend (per session)</p>
+                          {gradedRows.length < 2 ? (
+                            <p className="text-sm text-muted-foreground py-4 text-center">Grade more sessions to see a trend.</p>
+                          ) : (
+                            <div className="flex items-end gap-2 h-24 pt-2">
+                              {gradedRows.slice().reverse().map((g, i) => {
+                                const score = g.rubricOverallScore ?? 0;
+                                const heightPct = (score / 4) * 100;
+                                const bar = score >= 3.5 ? "bg-emerald-500" : score >= 2.5 ? "bg-blue-500" : score >= 1.5 ? "bg-amber-400" : "bg-red-500";
+                                const dateLabel = g.scheduledAt ? new Date(g.scheduledAt).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : `#${i + 1}`;
+                                return (
+                                  <div key={i} className="flex flex-col items-center gap-1 flex-1" title={`${dateLabel}: ${score.toFixed(1)}/4`}>
+                                    <span className="text-xs font-semibold text-muted-foreground">{score.toFixed(1)}</span>
+                                    <div className="w-full flex items-end justify-center h-16">
+                                      <div className={`w-full rounded-t ${bar} transition-all`} style={{ height: `${heightPct}%` }} />
+                                    </div>
+                                    <span className="text-xs text-muted-foreground truncate w-full text-center">{dateLabel}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Per-Student Breakdown */}
+              {analyticsStats.studentBreakdown.length > 0 && (
+                <div>
+                  <h3 className="text-base font-semibold flex items-center gap-2 mb-3">
+                    <Users className="w-4 h-4 text-primary" /> Student Breakdown
+                  </h3>
+                  <div className="grid md:grid-cols-2 gap-4">
+                    {analyticsStats.studentBreakdown.map(({ name, sessions, lastSession, quizScores }) => {
+                      const avg = quizScores.length > 0 ? Math.round(quizScores.reduce((a, b) => a + b, 0) / quizScores.length) : null;
+                      const initials = name.split(" ").map((n: string) => n[0]).join("").slice(0, 2).toUpperCase();
+                      return (
+                        <div key={name} className="rounded-xl border bg-card shadow-sm overflow-hidden">
+                          <div className="h-1.5 w-full bg-gradient-to-r from-blue-500 to-violet-500" />
+                          <div className="px-5 pt-4 pb-5 space-y-4">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-violet-500 flex items-center justify-center text-white font-bold text-sm shrink-0">
+                                {initials}
+                              </div>
+                              <div>
+                                <p className="font-semibold text-base leading-tight">{name}</p>
+                                <p className="text-xs text-muted-foreground">{lastSession ? `Last session ${new Date(lastSession).toLocaleDateString()}` : "No sessions yet"}</p>
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-3 gap-2">
+                              <div className="rounded-xl bg-blue-50 dark:bg-blue-950/40 p-3 text-center">
+                                <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">{sessions}</p>
+                                <p className="text-xs text-muted-foreground mt-0.5">Sessions</p>
+                              </div>
+                              <div className="rounded-xl bg-violet-50 dark:bg-violet-950/40 p-3 text-center">
+                                <p className="text-2xl font-bold text-violet-600 dark:text-violet-400">{quizScores.length}</p>
+                                <p className="text-xs text-muted-foreground mt-0.5">Quizzes</p>
+                              </div>
+                              <div className={`rounded-xl p-3 text-center ${avg == null ? "bg-muted/50" : avg >= 70 ? "bg-emerald-50 dark:bg-emerald-950/40" : avg >= 40 ? "bg-amber-50 dark:bg-amber-950/40" : "bg-red-50 dark:bg-red-950/40"}`}>
+                                <p className={`text-2xl font-bold ${avg == null ? "text-muted-foreground" : avg >= 70 ? "text-emerald-600 dark:text-emerald-400" : avg >= 40 ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400"}`}>
+                                  {avg != null ? `${avg}%` : "—"}
+                                </p>
+                                <p className="text-xs text-muted-foreground mt-0.5">Avg Score</p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               )}
             </TabsContent>
 
@@ -930,6 +1428,115 @@ export default function ParentDashboard() {
           </Tabs>
         </div>
       </div>
+
+      {/* Quiz Taking Modal */}
+      {quizModal && (
+        <Dialog open={true} onOpenChange={() => setQuizModal(null)}>
+          <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col gap-0 p-0">
+            <div className="px-6 pt-6 pb-4 border-b shrink-0">
+              <DialogTitle>Session Quiz</DialogTitle>
+              <DialogDescription className="mt-1">
+                {quizModal.submitted
+                  ? "Quiz completed! Here are your results."
+                  : `Answer all ${quizModal.quiz.questions.length} questions then submit.`}
+              </DialogDescription>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto space-y-6 px-6 py-4">
+              {quizModal.submitted ? (
+                <div className="space-y-4">
+                  <div className="text-center space-y-2 py-4">
+                    <div className={`text-5xl font-bold ${quizModal.score == null || quizModal.score >= 70 ? "text-green-600 dark:text-green-400" : quizModal.score >= 40 ? "text-orange-500 dark:text-orange-400" : "text-red-600 dark:text-red-400"}`}>{quizModal.score}%</div>
+                    <p className="text-lg text-muted-foreground">
+                      {quizModal.correct} out of {quizModal.total} correct
+                    </p>
+                  </div>
+                  {quizModal.quiz.questions.map((q, idx) => {
+                    const isCorrect = quizModal.answers[idx] === q.correctAnswer;
+                    return (
+                      <div
+                        key={q.id}
+                        className={`p-3 rounded-lg border-l-4 ${
+                          isCorrect
+                            ? "border-green-500 bg-green-50 dark:bg-green-950/20"
+                            : "border-red-500 bg-red-50 dark:bg-red-950/20"
+                        }`}
+                      >
+                        <p className="text-sm font-medium mb-1">{idx + 1}. {q.question}</p>
+                        <p className="text-xs text-muted-foreground">
+                          Your answer:{" "}
+                          <span className={isCorrect ? "text-green-700 dark:text-green-400" : "text-red-700 dark:text-red-400"}>
+                            {q.options[quizModal.answers[idx]] ?? "Not answered"}
+                          </span>
+                          {!isCorrect && (
+                            <span className="text-green-600 dark:text-green-400 ml-2">
+                              Correct: {q.options[q.correctAnswer]}
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                quizModal.quiz.questions.map((q, idx) => (
+                  <div key={q.id} className="space-y-3">
+                    <p className="text-sm font-semibold">{idx + 1}. {q.question}</p>
+                    <RadioGroup
+                      value={quizModal.answers[idx]?.toString() ?? ""}
+                      onValueChange={(val) => {
+                        setQuizModal((prev) =>
+                          prev ? { ...prev, answers: { ...prev.answers, [idx]: parseInt(val) } } : prev
+                        );
+                      }}
+                      className="space-y-2"
+                    >
+                      {q.options.map((opt, optIdx) => (
+                        <div
+                          key={optIdx}
+                          className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer"
+                        >
+                          <RadioGroupItem value={optIdx.toString()} id={`q${idx}-opt${optIdx}`} />
+                          <Label htmlFor={`q${idx}-opt${optIdx}`} className="cursor-pointer text-sm flex-1">
+                            {opt}
+                          </Label>
+                        </div>
+                      ))}
+                    </RadioGroup>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <DialogFooter className="px-6 py-4 border-t shrink-0">
+              {quizModal.submitted ? (
+                <Button onClick={() => setQuizModal(null)}>Close</Button>
+              ) : (
+                <>
+                  <Button variant="outline" onClick={() => setQuizModal(null)}>Cancel</Button>
+                  <Button
+                    onClick={() => {
+                      const answersArray = quizModal.quiz.questions.map((_, idx) =>
+                        quizModal.answers[idx] ?? -1
+                      );
+                      completeQuizMutation.mutate({
+                        quizId: quizModal.quiz.id,
+                        answers: answersArray,
+                      });
+                    }}
+                    disabled={
+                      completeQuizMutation.isPending ||
+                      Object.keys(quizModal.answers).length < quizModal.quiz.questions.length
+                    }
+                  >
+                    {completeQuizMutation.isPending ? "Submitting..." : "Submit Quiz"}
+                  </Button>
+                </>
+              )}
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }

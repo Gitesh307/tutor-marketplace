@@ -7,11 +7,14 @@ type User = {
   firstName?: string | null;
   lastName?: string | null;
   role: "parent" | "tutor" | "admin" | "coordinator";
+  timezone?: string | null;
+  lastSignedIn?: string | null;
 };
 
 type AuthContextValue = {
   user: User | null;
   loading: boolean;
+  previousLastSignedIn: string | null;
   login: (email: string, password: string) => Promise<User | null>;
   signup: (data: { firstName: string; lastName: string; email: string; password: string; role: "parent" | "tutor" | "admin" | "coordinator"; timezone?: string }) => Promise<User | null>;
   logout: () => Promise<void>;
@@ -38,6 +41,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [previousLastSignedIn, setPreviousLastSignedIn] = useState<string | null>(null);
 
   const fetchProfile = useCallback(async () => {
     setLoading(true);
@@ -65,15 +69,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [fetchProfile]);
 
   const login = useCallback(async (email: string, password: string) => {
-    await request<{ user: User }>("/api/auth/login", {
+    const timezone = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return undefined; } })();
+    const loginData = await request<{ user: User; previousLastSignedIn: string | null }>("/api/auth/login", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, timezone }),
     });
+    setPreviousLastSignedIn(loginData.previousLastSignedIn ?? null);
     const next = await fetchProfile();
     return next;
   }, [fetchProfile]);
 
-  const signup = useCallback(async (data: { firstName: string; lastName: string; email: string; password: string; role: "parent" | "tutor" | "admin" | "coordinator"; timezone?: string }) => {
+  const signup = useCallback(async (data: { firstName: string; lastName: string; email: string; password: string; role: "parent" | "tutor" | "admin" | "coordinator"; timezone?: string; refCode?: string }) => {
     await request<{ user: User }>("/api/auth/signup", {
       method: "POST",
       body: JSON.stringify(data),
@@ -85,6 +91,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = useCallback(async () => {
     await request<{ success: boolean }>("/api/auth/logout", { method: "POST" }).catch(() => {});
     setUser(null);
+    setPreviousLastSignedIn(null);
   }, []);
 
   const refreshProfile = useCallback(async () => { await fetchProfile(); }, [fetchProfile]);
@@ -92,11 +99,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<AuthContextValue>(() => ({
     user,
     loading,
+    previousLastSignedIn,
     login,
     signup,
     logout,
     refreshProfile,
-  }), [user, loading, login, signup, logout, refreshProfile]);
+  }), [user, loading, previousLastSignedIn, login, signup, logout, refreshProfile]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

@@ -1,5 +1,7 @@
 import React from "react";
 import Navigation from "@/components/Navigation";
+import { CoursePrice } from "@/components/CoursePrice";
+import { useFormatPrice } from "@/hooks/useFormatPrice";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -21,6 +23,7 @@ import { TutorAvailabilityModal } from "@/components/TutorAvailabilityModal";
 export default function CourseDetail() {
   const { id } = useParams();
   const courseId = parseInt(id || "0");
+  const formatPrice = useFormatPrice();
   const { user, isAuthenticated } = useAuth();
   const [, setLocation] = useLocation();
   const [isEnrollDialogOpen, setIsEnrollDialogOpen] = React.useState(false);
@@ -50,9 +53,32 @@ export default function CourseDetail() {
     undefined,
     { enabled: isAuthenticated && user?.role === "parent" }
   );
+  const { data: siblingDiscountData } = trpc.subscription.checkSiblingDiscount.useQuery(
+    { studentFirstName, studentLastName },
+    { enabled: isAuthenticated && user?.role === "parent" && !!studentFirstName && !!studentLastName }
+  );
+  const siblingDiscount = siblingDiscountData?.eligible ?? false;
+  const discountPercent = siblingDiscountData?.discountPercent ?? 0;
+
+  // Promo code state
+  const [promoCode, setPromoCode] = React.useState("");
+  const [promoValidation, setPromoValidation] = React.useState<{ valid: boolean; discountAmountUsd?: number; discountAmountInr?: number; reason?: string } | null>(null);
+  const validateCouponQuery = trpc.referral.validateCoupon.useQuery(
+    { code: promoCode, coursePriceUsd: course ? parseFloat(course.price) : undefined },
+    { enabled: false }
+  );
+
+  const handleValidatePromo = async () => {
+    if (!promoCode.trim()) return;
+    const result = await validateCouponQuery.refetch();
+    if (result.data) setPromoValidation(result.data);
+  };
+
+  // Promo code gives fixed USD amount off; sibling discount is still percentage-based
+  const promoDiscountUsd = promoValidation?.valid ? (promoValidation.discountAmountUsd ?? 0) : 0;
+
   const createCheckoutMutation = trpc.course.createCheckoutSession.useMutation();
   const enrollWithoutPaymentMutation = trpc.course.enrollWithoutPayment.useMutation();
-  const enrollWithInstallmentMutation = trpc.course.enrollWithInstallment.useMutation();
 
   // Trial lesson state
   const [isTrialDialogOpen, setIsTrialDialogOpen] = React.useState(false);
@@ -139,18 +165,30 @@ export default function CourseDetail() {
         preferredTutorId: selectedTutorId || undefined,
         studentFirstName,
         studentLastName,
-        studentGrade: studentGrade || "Not specified",
+        studentGrade: studentGrade || "Grade Not Specified",
+        origin: window.location.origin,
+        promoCode: promoValidation?.valid ? promoCode.trim().toUpperCase() : undefined,
       });
 
       if (result?.success) {
         setIsEnrollDialogOpen(false);
-        toast.success("Enrollment completed and payment marked as paid.");
-        setLocation("/parent/dashboard");
+        if (result.checkoutUrl) {
+          // Store the applied promo code so the dashboard can suppress the popup after redirect
+          if (promoValidation?.valid && promoCode.trim()) {
+            sessionStorage.setItem("justUsedCoupon", promoCode.trim().toUpperCase());
+          }
+          toast.success("Opening payment in a new tab...");
+          window.open(result.checkoutUrl, "_blank");
+        } else {
+          toast.success("Enrollment created. Complete payment from your dashboard.");
+          setLocation("/parent/dashboard");
+        }
       } else {
         toast.error("Enrollment failed. Please try again.");
       }
-    } catch (error) {
-      toast.error("Failed to process enrollment");
+    } catch (error: any) {
+      const message = error?.data?.message || error?.message || "Failed to process enrollment";
+      toast.error(message);
     }
   };
 
@@ -161,55 +199,28 @@ export default function CourseDetail() {
     }
 
     try {
-      await enrollWithoutPaymentMutation.mutateAsync({
+      const result = await enrollWithoutPaymentMutation.mutateAsync({
         courseId,
         studentFirstName,
         studentLastName,
-        studentGrade: studentGrade || "Not specified",
+        studentGrade: studentGrade || "Grade Not specified",
         preferredTutorId: selectedTutorId || undefined,
+        origin: window.location.origin,
+        promoCode: promoValidation?.valid ? promoCode.trim().toUpperCase() : undefined,
       });
 
       setIsEnrollDialogOpen(false);
-      
-      // If tutor is selected, offer to book first session
-      if (selectedTutorId) {
-        toast.success("Enrolled successfully! Would you like to book your first session?", {
-          action: {
-            label: "Book Now",
-            onClick: () => setIsBookingDialogOpen(true),
-          },
-        });
+
+      if (result?.setupUrl) {
+        toast.success("Enrolled! Opening monthly billing setup in a new tab...");
+        window.open(result.setupUrl, "_blank");
       } else {
-        toast.success("Enrolled successfully! You can pay later from your dashboard.");
-      }
-      setLocation("/parent/dashboard");
-    } catch (error) {
-      toast.error("Failed to enroll");
-    }
-  };
-
-  const handleInstallmentPayment = async () => {
-    if (!studentFirstName || !studentLastName) {
-      toast.error("Please provide student's first and last name");
-      return;
-    }
-
-    try {
-      const { checkoutUrl } = await enrollWithInstallmentMutation.mutateAsync({
-        courseId,
-        preferredTutorId: selectedTutorId || undefined,
-        studentFirstName,
-        studentLastName,
-        studentGrade: studentGrade || "Not specified",
-      });
-
-      if (checkoutUrl) {
-        setIsEnrollDialogOpen(false);
-        toast.success("Redirecting to payment for first installment...");
-        window.open(checkoutUrl, "_blank");
+        toast.success("Enrolled successfully! Add your payment method from the dashboard.");
+        setLocation("/parent/dashboard");
       }
     } catch (error: any) {
-      toast.error(error.message || "Failed to process installment enrollment");
+      const message = error?.data?.message || error?.message || "Failed to enroll";
+      toast.error(message);
     }
   };
 
@@ -283,6 +294,8 @@ export default function CourseDetail() {
   }
 
   const price = parseFloat(course.price);
+  const siblingDiscountAmount = siblingDiscount ? (price * discountPercent / 100) : 0;
+  const effectiveTotal = Math.max(0, price - siblingDiscountAmount - promoDiscountUsd);
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
@@ -413,7 +426,7 @@ export default function CourseDetail() {
               <Card className="sticky top-24 border-2 z-20 bg-background">
                 <CardHeader>
                   <div className="flex items-baseline gap-2 mb-2">
-                    <span className="text-4xl font-bold text-primary">${price}</span>
+                    <CoursePrice price={price} region={course.region ?? "global"} priceClassName="text-4xl font-bold text-primary" />
                     {course.totalSessions && (
                       <span className="text-sm text-muted-foreground">
                         / {course.totalSessions} sessions
@@ -421,8 +434,8 @@ export default function CourseDetail() {
                     )}
                   </div>
                   <CardDescription>
-                    {course.totalSessions 
-                      ? `$${(price / course.totalSessions).toFixed(2)} per session`
+                    {course.totalSessions
+                      ? `${formatPrice(price / course.totalSessions)} per session`
                       : "Course package pricing"
                     }
                   </CardDescription>
@@ -459,7 +472,7 @@ export default function CourseDetail() {
                                   <SelectContent>
                                     {tutorsWithAvailability.map((tutor: any) => (
                                       <SelectItem key={tutor.user.id} value={tutor.user.id.toString()}>
-                                        {tutor.user.name} {tutor.profile?.hourlyRate && `- $${tutor.profile.hourlyRate}/hr`}
+                                        {tutor.user.name}
                                       </SelectItem>
                                     ))}
                                   </SelectContent>
@@ -531,23 +544,69 @@ export default function CourseDetail() {
                               </Select>
                             </div>
                           </div>
-                          <div className="space-y-3">
-                            {price > 500 && (
-                              <div className="bg-accent/10 border border-accent/20 rounded-lg p-4">
-                                <p className="text-sm font-medium mb-2">💳 Installment Plan Available</p>
-                                <p className="text-xs text-muted-foreground mb-3">
-                                  Pay in 2 installments: ${(price / 2).toFixed(2)} now, ${(price / 2).toFixed(2)} later
-                                </p>
+                          {siblingDiscount && (
+                            <div className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-950/20 rounded-lg border border-green-200 dark:border-green-900">
+                              <Badge className="bg-green-600 text-white text-xs shrink-0">
+                                {discountPercent}% Sibling Discount
+                              </Badge>
+                              <p className="text-sm text-green-800 dark:text-green-200">
+                                First enrollment for this child — {formatPrice(price * discountPercent / 100)} off applied automatically.
+                              </p>
+                            </div>
+                          )}
+
+                          {/* Promo Code */}
+                          {isAuthenticated && (
+                            <div className="space-y-2">
+                              <Label htmlFor="promo-code">Promo Code (Optional)</Label>
+                              <div className="flex gap-2">
+                                <Input
+                                  id="promo-code"
+                                  placeholder="e.g. REF-ABC123"
+                                  value={promoCode}
+                                  onChange={(e) => { setPromoCode(e.target.value.toUpperCase()); setPromoValidation(null); }}
+                                  className="uppercase"
+                                />
                                 <Button
-                                  variant="default"
-                                  className="w-full"
-                                  onClick={handleInstallmentPayment}
-                                  disabled={enrollWithInstallmentMutation.isPending || !studentFirstName || !studentLastName}
+                                  type="button"
+                                  variant="outline"
+                                  onClick={handleValidatePromo}
+                                  disabled={!promoCode.trim() || validateCouponQuery.isFetching}
                                 >
-                                  {enrollWithInstallmentMutation.isPending ? "Processing..." : "Pay in 2 Installments"}
+                                  {validateCouponQuery.isFetching ? "..." : "Apply"}
                                 </Button>
                               </div>
-                            )}
+                              {promoValidation && (
+                                promoValidation.valid ? (
+                                  <p className="text-sm text-green-600 font-medium">
+                                    ✓ {formatPrice(promoDiscountUsd)} discount applied!
+                                  </p>
+                                ) : (
+                                  <p className="text-sm text-destructive">{promoValidation.reason}</p>
+                                )
+                              )}
+                            </div>
+                          )}
+
+                          {(siblingDiscount || promoDiscountUsd > 0) && (
+                            <div className="flex items-center justify-between p-3 bg-primary/5 rounded-lg border border-primary/20 text-sm">
+                              <span className="text-muted-foreground">
+                                Total after discount
+                                {siblingDiscount && promoDiscountUsd > 0 && (
+                                  <span className="ml-1 text-xs">({discountPercent}% sibling + {formatPrice(promoDiscountUsd)} promo)</span>
+                                )}
+                                {siblingDiscount && promoDiscountUsd === 0 && (
+                                  <span className="ml-1 text-xs">({discountPercent}% sibling)</span>
+                                )}
+                                {!siblingDiscount && promoDiscountUsd > 0 && (
+                                  <span className="ml-1 text-xs">({formatPrice(promoDiscountUsd)} promo)</span>
+                                )}
+                              </span>
+                              <span className="font-bold text-primary">{formatPrice(effectiveTotal)}</span>
+                            </div>
+                          )}
+
+                          <div className="space-y-3">
                             <div className="flex gap-2">
                               <Button
                                 variant="outline"
@@ -561,17 +620,19 @@ export default function CourseDetail() {
                                 onClick={handleEnroll}
                                 disabled={createCheckoutMutation.isPending || !studentFirstName || !studentLastName}
                               >
-                                {createCheckoutMutation.isPending ? "Processing..." : "Pay in Full"}
+                                {createCheckoutMutation.isPending ? "Processing..." : (siblingDiscount || promoDiscountUsd > 0) ? `Pay ${formatPrice(effectiveTotal)}` : "Pay in Full"}
                               </Button>
                             </div>
-                            <Button
-                              variant="secondary"
-                              className="w-full"
-                              onClick={handlePayLater}
-                              disabled={enrollWithoutPaymentMutation.isPending || !studentFirstName || !studentLastName}
-                            >
-                              {enrollWithoutPaymentMutation.isPending ? "Enrolling..." : "Pay Later"}
-                            </Button>
+                            {price >= 150 && (
+                              <Button
+                                variant="secondary"
+                                className="w-full"
+                                onClick={handlePayLater}
+                                disabled={enrollWithoutPaymentMutation.isPending || !studentFirstName || !studentLastName}
+                              >
+                                {enrollWithoutPaymentMutation.isPending ? "Enrolling..." : "Enroll & Pay Monthly"}
+                              </Button>
+                            )}
                           </div>
                         </DialogContent>
                       </Dialog>
@@ -605,12 +666,10 @@ export default function CourseDetail() {
                     ) : (
                       <div className="text-center py-4">
                         <p className="text-sm text-muted-foreground mb-3">
-                          Only parent accounts can enroll in courses
+                          Only parent accounts can enroll in courses.
                         </p>
                         <Button asChild variant="outline" className="w-full">
-                          <Link href="/role-selection">
-                            Switch to Parent Account
-                          </Link>
+                          <a href={LOGIN_PATH}>Switch to Parent Account</a>
                         </Button>
                       </div>
                     )

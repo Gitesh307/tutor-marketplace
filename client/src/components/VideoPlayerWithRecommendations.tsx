@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
+import { useFormatPrice } from "@/hooks/useFormatPrice";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -12,13 +13,14 @@ interface VideoPlayerWithRecommendationsProps {
   tutorName: string;
 }
 
-export function VideoPlayerWithRecommendations({ 
-  videoUrl, 
+export function VideoPlayerWithRecommendations({
+  videoUrl,
   tutorId,
-  tutorName 
+  tutorName
 }: VideoPlayerWithRecommendationsProps) {
   const [showRecommendations, setShowRecommendations] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const formatPrice = useFormatPrice();
 
   const { data: similarTutors, isLoading } = trpc.tutorProfile.getSimilar.useQuery(
     { tutorId, limit: 2 },
@@ -102,14 +104,6 @@ export function VideoPlayerWithRecommendations({
                                 </div>
                               )}
                             </div>
-                            {tutor.hourlyRate && (
-                              <div className="text-right">
-                                <div className="text-xl font-bold text-primary">
-                                  ${parseFloat(tutor.hourlyRate).toFixed(0)}
-                                  <span className="text-xs font-normal text-muted-foreground">/hr</span>
-                                </div>
-                              </div>
-                            )}
                           </div>
 
                           {/* Bio */}

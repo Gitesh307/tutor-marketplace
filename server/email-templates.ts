@@ -314,36 +314,60 @@ interface BookingConfirmationEmailProps {
   sessionPrice: string;
   dashboardUrl: string;
   messagesUrl: string;
+  // For recurring bookings — all session dates/times after the first
+  additionalSessions?: { date: string; time: string }[];
 }
 
 /**
  * Booking confirmation email template
  */
 export function getBookingConfirmationEmail(props: BookingConfirmationEmailProps): string {
-  const { 
-    userName, 
-    userRole, 
-    courseName, 
+  const {
+    userName,
+    userRole,
+    courseName,
     tutorName,
     studentName,
-    sessionDate, 
-    sessionTime, 
+    sessionDate,
+    sessionTime,
     sessionDuration,
     sessionPrice,
     dashboardUrl,
-    messagesUrl
+    messagesUrl,
+    additionalSessions,
   } = props;
-  
+
   const isParent = userRole === 'parent';
   const otherPartyName = isParent ? tutorName : studentName;
-  
+  const isRecurring = additionalSessions && additionalSessions.length > 0;
+  const totalSessions = isRecurring ? 1 + additionalSessions!.length : 1;
+
+  const allSessionsHtml = isRecurring ? `
+    <tr>
+      <td style="padding: 8px 0; font-weight: 600; color: #111827; vertical-align: top; width: 140px;">All Sessions (${totalSessions}):</td>
+      <td style="padding: 8px 0; color: #374151;">
+        <div style="margin-bottom: 4px;">1. ${sessionDate} at ${sessionTime}</div>
+        ${additionalSessions!.map((s, i) => `<div style="margin-bottom: 4px;">${i + 2}. ${s.date} at ${s.time}</div>`).join('')}
+      </td>
+    </tr>
+  ` : `
+    <tr>
+      <td style="padding: 8px 0; font-weight: 600; color: #111827; width: 140px;">Date:</td>
+      <td style="padding: 8px 0; color: #374151;">${sessionDate}</td>
+    </tr>
+    <tr>
+      <td style="padding: 8px 0; font-weight: 600; color: #111827;">Time:</td>
+      <td style="padding: 8px 0; color: #374151;">${sessionTime}</td>
+    </tr>
+  `;
+
   const content = `
-    <h1>Session Confirmed! ✅</h1>
-    
+    <h1>${isRecurring ? `${totalSessions} Sessions Confirmed! ✅` : 'Session Confirmed! ✅'}</h1>
+
     <p>Hi ${userName},</p>
-    
-    <p>Great news! Your tutoring session has been confirmed. Here are the details:</p>
-    
+
+    <p>Great news! Your tutoring session${isRecurring ? 's have' : ' has'} been confirmed. Here are the details:</p>
+
     <div class="highlight-box">
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 0;">
         <tr>
@@ -354,14 +378,7 @@ export function getBookingConfirmationEmail(props: BookingConfirmationEmailProps
           <td style="padding: 8px 0; font-weight: 600; color: #111827;">${isParent ? 'Tutor:' : 'Student:'}</td>
           <td style="padding: 8px 0; color: #374151;">${otherPartyName}</td>
         </tr>
-        <tr>
-          <td style="padding: 8px 0; font-weight: 600; color: #111827;">Date:</td>
-          <td style="padding: 8px 0; color: #374151;">${sessionDate}</td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; font-weight: 600; color: #111827;">Time:</td>
-          <td style="padding: 8px 0; color: #374151;">${sessionTime}</td>
-        </tr>
+        ${allSessionsHtml}
         <tr>
           <td style="padding: 8px 0; font-weight: 600; color: #111827;">Duration:</td>
           <td style="padding: 8px 0; color: #374151;">${sessionDuration}</td>
@@ -852,5 +869,244 @@ export function getNoShowNotificationEmail(props: NoShowNotificationEmailProps):
 
   return getEmailBase(content, {
     preheaderText: `Session no-show notification for ${studentName} - ${courseName}`
+  });
+}
+
+interface TutorApplicationReceivedEmailProps {
+  tutorName: string;
+  tutorEmail: string;
+  subjects: string[];
+}
+
+export function getTutorApplicationReceivedEmail(props: TutorApplicationReceivedEmailProps): string {
+  const { tutorName, tutorEmail, subjects } = props;
+
+  const content = `
+    <h1>Application Received!</h1>
+
+    <p>Hi ${tutorName},</p>
+
+    <p>Thank you for applying to join EdKonnect Academy as a tutor. We've received your application and our team will review it shortly.</p>
+
+    <div class="highlight-box">
+      <p style="margin: 0; font-weight: 600; color: #1e40af;">
+        Application submitted for: ${tutorEmail}
+      </p>
+    </div>
+
+    <h2>Your Application Details:</h2>
+    <ul style="margin: 16px 0; padding-left: 24px;">
+      <li style="margin-bottom: 8px;"><strong>Name:</strong> ${tutorName}</li>
+      <li style="margin-bottom: 8px;"><strong>Email:</strong> ${tutorEmail}</li>
+      <li style="margin-bottom: 8px;"><strong>Subjects:</strong> ${subjects.join(', ')}</li>
+    </ul>
+
+    <h2>What Happens Next?</h2>
+    <ul style="margin: 16px 0; padding-left: 24px;">
+      <li style="margin-bottom: 8px;">Our admin team will review your qualifications and experience</li>
+      <li style="margin-bottom: 8px;">You'll receive an email with the decision within 2-3 business days</li>
+      <li style="margin-bottom: 8px;">If approved, you'll get a link to set up your account and start tutoring</li>
+    </ul>
+
+    <p style="margin-top: 16px; color: #6b7280; font-size: 14px;">
+      If you did not submit this application or believe this was sent in error, please ignore this email.
+    </p>
+
+    <p style="margin-top: 16px;">
+      Best regards,<br>
+      <strong>The EdKonnect Academy Team</strong>
+    </p>
+  `;
+
+  return getEmailBase(content, {
+    preheaderText: 'We received your tutor application — we\'ll be in touch soon!'
+  });
+}
+
+interface PasswordResetEmailProps {
+  userName: string;
+  resetUrl: string;
+  expiresAt: Date;
+}
+
+export function getPasswordResetEmail(props: PasswordResetEmailProps): string {
+  const { userName, resetUrl, expiresAt } = props;
+  const expiresIn = Math.round((expiresAt.getTime() - Date.now()) / (1000 * 60));
+
+  const content = `
+    <h1>Reset Your Password</h1>
+
+    <p>Hi ${userName},</p>
+
+    <p>We received a request to reset the password for your EdKonnect Academy account. Click the button below to choose a new password:</p>
+
+    <div style="text-align: center; margin: 32px 0;">
+      <a href="${resetUrl}" class="button">
+        Reset Password
+      </a>
+    </div>
+
+    <div style="background-color: #fef3c7; border-left: 4px solid #f59e0b; padding: 16px; margin: 24px 0; border-radius: 4px;">
+      <p style="margin: 0; color: #92400e; font-size: 14px;">
+        <strong>⏰ This link expires in ${expiresIn} minutes</strong><br>
+        If you didn't request a password reset, you can safely ignore this email.
+      </p>
+    </div>
+
+    <div style="background-color: #eff6ff; border-left: 4px solid #3b82f6; padding: 16px; margin: 24px 0; border-radius: 4px;">
+      <p style="margin: 0; color: #1e40af; font-size: 14px;">
+        <strong>🔒 Security Note:</strong><br>
+        This link is unique to you and can only be used once. Do not share it with anyone.
+      </p>
+    </div>
+
+    <p style="margin-top: 24px;">
+      Best regards,<br>
+      <strong>The EdKonnect Academy Team</strong>
+    </p>
+  `;
+
+  return getEmailBase(content, {
+    preheaderText: 'Reset your EdKonnect Academy password'
+  });
+}
+
+// ============ Referral Emails ============
+
+interface ReferralInviteEmailProps {
+  invitedEmail: string;
+  referrerName: string;
+  signupUrl: string;
+}
+
+/**
+ * Email sent to the friend who was invited via referral
+ */
+export function getReferralInviteEmail(props: ReferralInviteEmailProps): string {
+  const { referrerName, signupUrl } = props;
+
+  const content = `
+    <h1>You've been invited to EdKonnect Academy!</h1>
+    <p>Hi there,</p>
+    <p><strong>${referrerName}</strong> thinks you'd love EdKonnect Academy — a platform connecting students with expert tutors for personalized learning.</p>
+
+    <div class="highlight-box">
+      <p style="margin: 0; font-weight: 600;">🎁 Special offer just for you</p>
+      <p style="margin: 8px 0 0 0;">Sign up using the link below and enroll in your first course to receive a <strong>discount coupon</strong> (up to $25 off) — delivered to your inbox automatically.</p>
+    </div>
+
+    <div style="text-align: center; margin: 32px 0;">
+      <a href="${signupUrl}" class="button">Accept Invitation &amp; Sign Up</a>
+    </div>
+
+    <div class="divider"></div>
+
+    <p style="font-size: 14px; color: #6b7280;">
+      This invitation was sent by ${referrerName}. If you didn't expect this email, you can safely ignore it.
+    </p>
+
+    <p style="margin-top: 24px;">
+      Best regards,<br>
+      <strong>The EdKonnect Academy Team</strong>
+    </p>
+  `;
+
+  return getEmailBase(content, {
+    preheaderText: `${referrerName} invited you to EdKonnect Academy — get up to $25 off your first enrollment!`
+  });
+}
+
+interface ReferralWelcomeEmailProps {
+  userName: string;
+  referrerName: string;
+}
+
+/**
+ * Email sent to newly signed-up user who came via a referral link
+ */
+export function getReferralWelcomeEmail(props: ReferralWelcomeEmailProps): string {
+  const { userName, referrerName } = props;
+
+  const content = `
+    <h1>Welcome to EdKonnect Academy, ${userName}!</h1>
+    <p>You joined through a referral from <strong>${referrerName}</strong> — great choice!</p>
+
+    <div class="highlight-box">
+      <p style="margin: 0; font-weight: 600;">🎁 Your reward is waiting</p>
+      <p style="margin: 8px 0 0 0;">Enroll in your first course and a <strong>discount coupon</strong> (up to $25 off) will be sent to your email automatically. You can use it on any future enrollment.</p>
+    </div>
+
+    <p>Start exploring our courses and find the perfect tutor for your learning journey.</p>
+
+    <p style="margin-top: 24px;">
+      Best regards,<br>
+      <strong>The EdKonnect Academy Team</strong>
+    </p>
+  `;
+
+  return getEmailBase(content, {
+    preheaderText: `Welcome! Enroll in your first course to unlock your discount coupon (up to $25 off).`
+  });
+}
+
+interface CouponRewardEmailProps {
+  userName: string;
+  couponCode: string;
+  reason: 'referrer' | 'referred';
+  friendName?: string;
+}
+
+/**
+ * Email sent when a coupon reward is issued (to both referrer and referred user)
+ */
+export function getCouponRewardEmail(props: CouponRewardEmailProps): string {
+  const { userName, couponCode, reason, friendName } = props;
+
+  const isReferred = reason === 'referred';
+
+  const headline = isReferred
+    ? `🎁 Your referral discount coupon is here, ${userName}!`
+    : `🎉 Your referral reward is here, ${userName}!`;
+
+  const description = isReferred
+    ? `You verified your email — welcome to EdKonnect Academy! As a thank you for joining through a referral, here is your exclusive discount coupon. <strong>Use it when enrolling in your first course</strong> — the discount amount will be applied based on the course price.`
+    : `<strong>${friendName}</strong> just enrolled in their first course using your referral link. As a thank you, here is your reward coupon — use it on your next enrollment!`;
+
+  const usageNote = isReferred
+    ? `Valid for your <strong>first course enrollment only</strong>. Enter the code in the Promo Code field during enrollment.`
+    : `Valid for one-time use on any course enrollment.`;
+
+  const content = `
+    <h1>${headline}</h1>
+    <p>${description}</p>
+
+    <div class="highlight-box" style="text-align: center;">
+      <p style="margin: 0; font-size: 14px; color: #6b7280;">Your referral discount coupon code</p>
+      <p style="margin: 12px 0 4px 0; font-size: 36px; font-weight: 700; letter-spacing: 6px; color: #2563eb;">${couponCode}</p>
+      <p style="margin: 0; font-size: 13px; color: #6b7280;">One-time use &nbsp;·&nbsp; Never expires</p>
+    </div>
+
+    <p>How to apply your coupon:</p>
+    <ol style="margin: 16px 0; padding-left: 24px;">
+      <li style="margin-bottom: 8px;">Go to a course and click <strong>Enroll</strong></li>
+      <li style="margin-bottom: 8px;">Fill in the student details</li>
+      <li style="margin-bottom: 8px;">Enter <strong>${couponCode}</strong> in the <strong>Promo Code</strong> field and click Apply</li>
+      <li style="margin-bottom: 8px;">The discount will be applied automatically based on the course price</li>
+    </ol>
+
+    <div class="divider"></div>
+
+    <p style="font-size: 13px; color: #6b7280;">
+      ${usageNote} This coupon is tied to your account and cannot be transferred.
+    </p>
+
+    <p style="margin-top: 24px;">
+      Best regards,<br>
+      <strong>The EdKonnect Academy Team</strong>
+    </p>
+  `;
+
+  return getEmailBase(content, {
+    preheaderText: `Your referral discount coupon: ${couponCode} — use it on your${isReferred ? ' first' : ' next'} enrollment`
   });
 }

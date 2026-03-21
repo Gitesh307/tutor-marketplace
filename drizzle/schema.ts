@@ -22,12 +22,16 @@ export const users = mysqlTable("users", {
   phoneNumber: varchar("phoneNumber", { length: 20 }),
   phoneNumberVerified: boolean("phoneNumberVerified").default(false),
   timezone: varchar("timezone", { length: 100 }),
+  stripeCustomerId: varchar("stripeCustomerId", { length: 255 }),
+  referralCode: varchar("referralCode", { length: 16 }).unique(),
+  referredBy: varchar("referredBy", { length: 16 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
 }, (table) => ({
   emailIdx: index("users_email_idx").on(table.email),
   openIdIdx: index("users_openId_idx").on(table.openId),
+  referralCodeIdx: uniqueIndex("users_referralCode_idx").on(table.referralCode),
 }));
 
 export type User = typeof users.$inferSelect;
@@ -73,6 +77,22 @@ export const passwordSetupTokens = mysqlTable("password_setup_tokens", {
 }));
 
 export type PasswordSetupToken = typeof passwordSetupTokens.$inferSelect;
+
+// ============ Password Reset Tokens ============
+
+export const passwordResetTokens = mysqlTable("password_reset_tokens", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull().references(() => users.id, { onDelete: "cascade" }),
+  tokenHash: varchar("tokenHash", { length: 255 }).notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  consumedAt: timestamp("consumedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => ({
+  tokenHashIdx: index("password_reset_tokens_tokenHash_idx").on(table.tokenHash),
+  userIdIdx: index("password_reset_tokens_userId_idx").on(table.userId),
+}));
+
+export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
 
 /**
  * Tutor profiles with professional information
@@ -191,6 +211,9 @@ export const courses = mysqlTable("courses", {
   isActive: boolean("isActive").default(true).notNull(),
   imageUrl: text("imageUrl"),
   curriculum: text("curriculum"),
+  quizEnabled: boolean("quizEnabled").default(false).notNull(),
+  aiPowered: boolean("aiPowered").default(false).notNull(),
+  region: mysqlEnum("region", ["global", "us", "india"]).default("global").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, (table) => ({
@@ -251,12 +274,16 @@ export const subscriptions = mysqlTable("subscriptions", {
   endDate: timestamp("endDate"),
   sessionsCompleted: int("sessionsCompleted").default(0),
   stripeSubscriptionId: varchar("stripeSubscriptionId", { length: 255 }),
-  paymentStatus: mysqlEnum("paymentStatus", ["paid", "pending", "failed"]).default("pending").notNull(),
-  paymentPlan: mysqlEnum("paymentPlan", ["full", "installment"]).default("full").notNull(),
+  stripeItemId: varchar("stripeItemId", { length: 255 }),
+  paymentStatus: mysqlEnum("paymentStatus", ["paid", "pending", "failed", "completed"]).default("pending").notNull(),
+  paymentPlan: mysqlEnum("paymentPlan", ["full", "installment", "monthly"]).default("monthly").notNull(),
   firstInstallmentPaid: boolean("firstInstallmentPaid").default(false).notNull(),
   secondInstallmentPaid: boolean("secondInstallmentPaid").default(false).notNull(),
   firstInstallmentAmount: decimal("firstInstallmentAmount", { precision: 10, scale: 2 }),
   secondInstallmentAmount: decimal("secondInstallmentAmount", { precision: 10, scale: 2 }),
+  siblingDiscountApplied: boolean("siblingDiscountApplied").default(false).notNull(),
+  promoDiscountAmount: decimal("promoDiscountAmount", { precision: 10, scale: 2 }).default("0.00").notNull(),
+  discountAmount: decimal("discountAmount", { precision: 10, scale: 2 }),
   smsOptIn: boolean("smsOptIn").default(false).notNull(),
   smsConsentTimestamp: timestamp("smsConsentTimestamp"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -370,6 +397,7 @@ export const payments = mysqlTable("payments", {
   currency: varchar("currency", { length: 3 }).default("usd").notNull(),
   status: mysqlEnum("status", ["pending", "completed", "failed", "refunded"]).default("pending").notNull(),
   stripePaymentIntentId: varchar("stripePaymentIntentId", { length: 255 }),
+  stripeInvoiceId: varchar("stripeInvoiceId", { length: 255 }),
   paymentType: mysqlEnum("paymentType", ["subscription", "session"]).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -592,6 +620,8 @@ export const sessionNotes = mysqlTable("session_notes", {
   homework: text("homework"), // Assigned homework or practice tasks
   challenges: text("challenges"), // Areas where student struggled
   nextSteps: text("nextSteps"), // Recommendations for next session
+  transcript: mediumtext("transcript"), // Raw Zoom transcript text (for AI processing, supports up to 16MB)
+  topicsCovered: text("topicsCovered"), // JSON array of topics covered in session
   parentNotified: boolean("parentNotified").default(false).notNull(), // Whether parent was emailed
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -877,7 +907,7 @@ export type InsertZoomMeetingRecording = typeof zoomMeetingRecordings.$inferInse
  */
 export const sessionAIInsights = mysqlTable("session_ai_insights", {
   id: int("id").autoincrement().primaryKey(),
-  recordingId: varchar("recordingId", { length: 255 }).notNull().references(() => zoomMeetingRecordings.id, { onDelete: "cascade" }),
+  recordingId: varchar("recordingId", { length: 255 }).references(() => zoomMeetingRecordings.id, { onDelete: "cascade" }),
   sessionId: int("sessionId").references(() => sessions.id, { onDelete: "set null" }),
   summary: mediumtext("summary"), // AI-generated session summary
   homework: mediumtext("homework"), // AI-generated homework/action items
@@ -885,6 +915,16 @@ export const sessionAIInsights = mysqlTable("session_ai_insights", {
   keyTopics: text("keyTopics"), // JSON array of key topics discussed
   generatedAt: timestamp("generatedAt").defaultNow().notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
+  // Rubric grading fields (1–4 scale per criterion)
+  rubricAcademicEfficiency: int("rubricAcademicEfficiency"),
+  rubricInstructionalQuality: int("rubricInstructionalQuality"),
+  rubricStrategyInsight: int("rubricStrategyInsight"),
+  rubricSynthesisBranding: int("rubricSynthesisBranding"),
+  rubricEvidence: text("rubricEvidence"), // JSON: { criterion, score, evidence }[]
+  rubricOverallScore: decimal("rubricOverallScore", { precision: 3, scale: 2 }),
+  rubricGradedAt: timestamp("rubricGradedAt"),
+  rubricTranscriptQuality: varchar("rubricTranscriptQuality", { length: 10 }), // "high"|"medium"|"low"
+  rubricTranscriptQualityReason: text("rubricTranscriptQualityReason"),
 }, (table) => ({
   recordingIdIdx: index("session_ai_insights_recordingId_idx").on(table.recordingId),
   sessionIdIdx: index("session_ai_insights_sessionId_idx").on(table.sessionId),
@@ -912,3 +952,98 @@ export const sessionAIInsightsRelations = relations(sessionAIInsights, ({ one })
     references: [sessions.id],
   }),
 }));
+
+// ============ Session Quizzes ============
+
+export type QuizQuestion = {
+  id: string;
+  question: string;
+  options: [string, string, string, string];
+  correctAnswer: 0 | 1 | 2 | 3;
+};
+
+export const sessionQuizzes = mysqlTable("session_quizzes", {
+  id: int("id").autoincrement().primaryKey(),
+  sessionId: int("sessionId").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  courseId: int("courseId").references(() => courses.id, { onDelete: "set null" }),
+  tutorId: int("tutorId").notNull().references(() => users.id, { onDelete: "cascade" }),
+  parentId: int("parentId").notNull().references(() => users.id, { onDelete: "cascade" }),
+  questions: text("questions").notNull(), // JSON: QuizQuestion[]
+  status: mysqlEnum("session_quiz_status", ["draft", "approved", "completed"]).default("draft").notNull(),
+  assignedAt: timestamp("assignedAt"),
+  completedAt: timestamp("completedAt"),
+  parentNotified: boolean("parentNotified").default(false).notNull(),
+  score: int("score"),          // 0-100 percentage, null until completed
+  correctCount: int("correctCount"),
+  totalCount: int("totalCount"),
+  studentAnswers: text("studentAnswers"), // JSON: number[] — selected option index per question
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => ({
+  sessionIdIdx: index("session_quizzes_sessionId_idx").on(table.sessionId),
+  tutorIdIdx: index("session_quizzes_tutorId_idx").on(table.tutorId),
+  parentIdIdx: index("session_quizzes_parentId_idx").on(table.parentId),
+  courseIdIdx: index("session_quizzes_courseId_idx").on(table.courseId),
+  sessionUniqueIdx: uniqueIndex("session_quizzes_session_unique").on(table.sessionId),
+}));
+
+export type SessionQuiz = typeof sessionQuizzes.$inferSelect;
+export type InsertSessionQuiz = typeof sessionQuizzes.$inferInsert;
+
+// ============ Referrals ============
+
+export const referrals = mysqlTable("referrals", {
+  id: int("id").autoincrement().primaryKey(),
+  referrerId: int("referrerId").notNull().references(() => users.id, { onDelete: "cascade" }),
+  invitedEmail: varchar("invitedEmail", { length: 320 }).notNull(),
+  referredUserId: int("referredUserId").references(() => users.id, { onDelete: "set null" }),
+  status: mysqlEnum("referral_status", ["pending", "signed_up", "rewarded"]).default("pending").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => ({
+  referrerIdx: index("referrals_referrer_idx").on(table.referrerId),
+  invitedEmailIdx: index("referrals_invitedEmail_idx").on(table.invitedEmail),
+  referrerEmailUnique: uniqueIndex("referrals_referrer_email_unique").on(table.referrerId, table.invitedEmail),
+}));
+
+export type Referral = typeof referrals.$inferSelect;
+export type InsertReferral = typeof referrals.$inferInsert;
+
+// ============ Coupons ============
+
+export const coupons = mysqlTable("coupons", {
+  id: int("id").autoincrement().primaryKey(),
+  code: varchar("code", { length: 16 }).notNull().unique(),
+  userId: int("userId").notNull().references(() => users.id, { onDelete: "cascade" }),
+  // Fixed-amount discount — amount determined at enrollment based on course price tier
+  discountAmountUsd: decimal("discountAmountUsd", { precision: 10, scale: 2 }).default("0.00").notNull(),
+  discountAmountInr: decimal("discountAmountInr", { precision: 10, scale: 2 }).default("0.00").notNull(),
+  isUsed: boolean("isUsed").default(false).notNull(),
+  usedAt: timestamp("usedAt"),
+  sourceReferralId: int("sourceReferralId").references(() => referrals.id, { onDelete: "set null" }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => ({
+  codeIdx: uniqueIndex("coupons_code_idx").on(table.code),
+  userIdIdx: index("coupons_userId_idx").on(table.userId),
+}));
+
+export type Coupon = typeof coupons.$inferSelect;
+export type InsertCoupon = typeof coupons.$inferInsert;
+
+// ============ Referral Settings ============
+// Admin-configurable discount tiers for referral coupons
+
+export const referralSettings = mysqlTable("referral_settings", {
+  id: int("id").autoincrement().primaryKey(),
+  // Price tier upper bound in USD (null = no upper bound, i.e. highest tier)
+  maxPriceUsd: decimal("maxPriceUsd", { precision: 10, scale: 2 }),
+  discountAmountUsd: decimal("discountAmountUsd", { precision: 10, scale: 2 }).notNull(),
+  discountAmountInr: decimal("discountAmountInr", { precision: 10, scale: 2 }).notNull(),
+  // Display label e.g. "Up to $500", "$501–$1000", "Above $1000"
+  label: varchar("label", { length: 100 }).notNull(),
+  sortOrder: int("sortOrder").notNull().default(0),
+  updatedAt: timestamp("updatedAt").defaultNow().notNull().onUpdateNow(),
+});
+
+export type ReferralSetting = typeof referralSettings.$inferSelect;
+export type InsertReferralSetting = typeof referralSettings.$inferInsert;

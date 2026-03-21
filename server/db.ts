@@ -1,4 +1,4 @@
-import { eq, and, or, like, desc, asc, sql, gte, lte, lt, gt, inArray, isNotNull } from "drizzle-orm";
+import { eq, and, or, like, desc, asc, sql, gte, lte, lt, gt, inArray, isNotNull, ne } from "drizzle-orm";
 import { alias } from "drizzle-orm/mysql-core";
 import { drizzle } from "drizzle-orm/mysql2";
 import crypto from "crypto";
@@ -14,6 +14,7 @@ import {
   emailSettings, InsertEmailSettings,
   emailVerifications, EmailVerification,
   passwordSetupTokens, PasswordSetupToken,
+  passwordResetTokens, PasswordResetToken,
   sessionNotes, InsertSessionNote,
   sessionNoteAttachments, InsertSessionNoteAttachment,
   tutorReviews, InsertTutorReview,
@@ -26,7 +27,11 @@ import {
   sessionRatings, InsertSessionRating,
   coordinatorAssignments, InsertCoordinatorAssignment,
   zoomMeetingRecordings, InsertZoomMeetingRecording,
-  sessionAIInsights, InsertSessionAIInsight
+  sessionAIInsights, InsertSessionAIInsight,
+  sessionQuizzes, InsertSessionQuiz,
+  referrals, InsertReferral, Referral,
+  coupons, InsertCoupon, Coupon,
+  referralSettings, ReferralSetting
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
@@ -287,11 +292,82 @@ export async function consumePasswordSetupToken(token: string, newPasswordHash: 
   return await getUserById(setupToken.userId);
 }
 
+// ============ Password Reset Tokens ============
+
+export async function createPasswordResetToken(userId: number, ttlMs = 60 * 60 * 1000) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const token = crypto.randomBytes(32).toString("hex");
+  const tokenHash = hashToken(token);
+  const expiresAt = new Date(Date.now() + ttlMs);
+
+  // Invalidate previous tokens for this user
+  await db
+    .update(passwordResetTokens)
+    .set({ consumedAt: new Date() })
+    .where(and(eq(passwordResetTokens.userId, userId), sql`${passwordResetTokens.consumedAt} IS NULL`));
+
+  await db.insert(passwordResetTokens).values({ userId, tokenHash, expiresAt });
+
+  return token;
+}
+
+export async function validatePasswordResetToken(token: string): Promise<PasswordResetToken | null> {
+  const db = await getDb();
+  if (!db) return null;
+
+  const tokenHash = hashToken(token);
+  const result = await db
+    .select()
+    .from(passwordResetTokens)
+    .where(
+      and(
+        eq(passwordResetTokens.tokenHash, tokenHash),
+        gt(passwordResetTokens.expiresAt, new Date()),
+        sql`${passwordResetTokens.consumedAt} IS NULL`
+      )
+    )
+    .limit(1);
+
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function consumePasswordResetToken(token: string, newPasswordHash: string) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const resetToken = await validatePasswordResetToken(token);
+  if (!resetToken) return null;
+
+  await db.transaction(async tx => {
+    await tx
+      .update(passwordResetTokens)
+      .set({ consumedAt: new Date() })
+      .where(eq(passwordResetTokens.id, resetToken.id));
+
+    await tx
+      .update(users)
+      .set({ passwordHash: newPasswordHash })
+      .where(eq(users.id, resetToken.userId));
+  });
+
+  return await getUserById(resetToken.userId);
+}
+
 export async function getAllUsers() {
   const db = await getDb();
   if (!db) return [];
 
   return await db.select().from(users).orderBy(desc(users.createdAt));
+}
+
+export async function deleteUser(userId: number) {
+  const db = await getDb();
+  if (!db) return false;
+
+  await db.delete(users).where(eq(users.id, userId));
+  return true;
 }
 
 export async function updateUserRole(userId: number, role: "parent" | "tutor" | "admin") {
@@ -303,6 +379,51 @@ export async function updateUserRole(userId: number, role: "parent" | "tutor" | 
     return true;
   } catch (error) {
     console.error("[Database] Failed to update user role:", error);
+    return false;
+  }
+}
+
+export async function updateUserTimezone(userId: number, timezone: string) {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    await db.update(users).set({ timezone }).where(eq(users.id, userId));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function updateUserLastSignedIn(userId: number): Promise<Date | null> {
+  const db = await getDb();
+  if (!db) return null;
+  try {
+    const [existing] = await db.select({ lastSignedIn: users.lastSignedIn }).from(users).where(eq(users.id, userId)).limit(1);
+    const previous = existing?.lastSignedIn ?? null;
+    await db.update(users).set({ lastSignedIn: new Date() }).where(eq(users.id, userId));
+    return previous;
+  } catch {
+    return null;
+  }
+}
+
+export async function updateUserProfile(userId: number, updates: { firstName?: string; lastName?: string; email?: string; phoneNumber?: string }) {
+  const db = await getDb();
+  if (!db) return false;
+
+  try {
+    const updateData: any = { ...updates };
+    if (updates.firstName !== undefined || updates.lastName !== undefined) {
+      // Re-fetch current values to build the full name
+      const current = await db.select({ firstName: users.firstName, lastName: users.lastName }).from(users).where(eq(users.id, userId)).limit(1);
+      const first = updates.firstName ?? current[0]?.firstName ?? '';
+      const last = updates.lastName ?? current[0]?.lastName ?? '';
+      updateData.name = `${first} ${last}`.trim();
+    }
+    await db.update(users).set(updateData).where(eq(users.id, userId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update user profile:", error);
     return false;
   }
 }
@@ -641,9 +762,7 @@ export async function createCoordinatorProfile(profile: InsertCoordinatorProfile
   }
 
   try {
-    console.log("[Database] Creating coordinator profile with data:", profile);
     const result = await db.insert(coordinatorProfiles).values(profile) as any;
-    console.log("[Database] Insert result:", result);
 
     // Handle both array and direct object response from drizzle
     const resultSetHeader = Array.isArray(result) ? result[0] : result;
@@ -653,7 +772,6 @@ export async function createCoordinatorProfile(profile: InsertCoordinatorProfile
       return null;
     }
 
-    console.log("[Database] Successfully created coordinator profile with ID:", resultSetHeader.insertId);
     return Number(resultSetHeader.insertId);
   } catch (error) {
     console.error("[Database] Failed to create coordinator profile:", error);
@@ -717,19 +835,37 @@ export async function createCoordinatorAssignment(assignment: InsertCoordinatorA
   if (!db) return null;
 
   try {
-    // First, deactivate any existing active assignments for this parent
+    // Deactivate any active assignments for this parent with a different coordinator
     await db
       .update(coordinatorAssignments)
       .set({ isActive: false })
       .where(and(
         eq(coordinatorAssignments.parentId, assignment.parentId),
+        ne(coordinatorAssignments.coordinatorId, assignment.coordinatorId),
         eq(coordinatorAssignments.isActive, true)
       ));
 
-    // Then create the new assignment
-    const result = await db.insert(coordinatorAssignments).values(assignment) as any;
+    // Check if a row already exists for this (coordinatorId, parentId) pair
+    const existing = await db
+      .select()
+      .from(coordinatorAssignments)
+      .where(and(
+        eq(coordinatorAssignments.coordinatorId, assignment.coordinatorId),
+        eq(coordinatorAssignments.parentId, assignment.parentId)
+      ))
+      .limit(1);
 
-    // Handle both array and direct object response from drizzle
+    if (existing.length > 0) {
+      // Reactivate the existing row instead of inserting a duplicate
+      await db
+        .update(coordinatorAssignments)
+        .set({ isActive: true, assignedAt: new Date(), assignedBy: assignment.assignedBy ?? null })
+        .where(eq(coordinatorAssignments.id, existing[0].id));
+      return existing[0].id;
+    }
+
+    // Insert a new assignment
+    const result = await db.insert(coordinatorAssignments).values(assignment) as any;
     const resultSetHeader = Array.isArray(result) ? result[0] : result;
 
     if (!resultSetHeader || !resultSetHeader.insertId) {
@@ -790,7 +926,6 @@ export async function getCoordinatorAssignmentsByCoordinator(coordinatorId: numb
   }
 
   try {
-    console.log(`[Database] Querying coordinator_assignments for coordinatorId: ${coordinatorId}`);
     const parent = alias(users, "parent");
     const result = await db
       .select({
@@ -829,7 +964,6 @@ export async function getCoordinatorAssignmentsByCoordinator(coordinatorId: numb
       ))
       .orderBy(desc(coordinatorAssignments.assignedAt));
 
-    console.log(`[Database] Query returned ${result.length} assignments`);
     return result;
   } catch (error) {
     console.error("[Database] Failed to get coordinator assignments by coordinator:", error);
@@ -1071,19 +1205,30 @@ export async function getCoursesByTutorId(tutorId: number) {
     .orderBy(desc(courses.createdAt));
 }
 
-export async function getAllActiveCourses() {
+export async function getAllActiveCourses(region?: "global" | "us" | "india") {
   const db = await getDb();
   if (!db) return [];
 
-  return await db.select().from(courses).where(eq(courses.isActive, true)).orderBy(desc(courses.createdAt));
+  const allowedRegions: ("global" | "us" | "india")[] =
+    region === "india" ? ["global", "india"]
+    : region === "us"  ? ["global", "us"]
+    : ["global", "us", "india"]; // no region = return all (undetected/admin)
+
+  return await db.select().from(courses)
+    .where(and(eq(courses.isActive, true), inArray(courses.region, allowedRegions)))
+    .orderBy(desc(courses.createdAt));
 }
 
-export async function updateCourse(id: number, updates: Partial<InsertCourse>) {
+export async function updateCourse(id: number, updates: Record<string, any>) {
   const db = await getDb();
   if (!db) return false;
 
   try {
-    await db.update(courses).set(updates).where(eq(courses.id, id));
+    const { region, aiPowered, ...rest } = updates;
+    const setData: any = { ...rest };
+    if (region !== undefined) setData.region = region;
+    if (aiPowered !== undefined) setData.aiPowered = aiPowered;
+    await db.update(courses).set(setData).where(eq(courses.id, id));
     return true;
   } catch (error) {
     console.error("[Database] Failed to update course:", error);
@@ -1272,8 +1417,10 @@ export async function getTutorsForPreferenceDropdown() {
         id: users.id,
         name: users.name,
         email: users.email,
+        hourlyRate: tutorProfiles.hourlyRate,
       })
       .from(users)
+      .leftJoin(tutorProfiles, eq(tutorProfiles.userId, users.id))
       .where(eq(users.role, "tutor"))
       .orderBy(asc(users.name));
   } catch (error) {
@@ -1507,6 +1654,60 @@ export async function updateSubscription(id: number, updates: Partial<InsertSubs
     console.error("[Database] Failed to update subscription:", error);
     return false;
   }
+}
+
+export async function updateUserStripeCustomerId(userId: number, stripeCustomerId: string) {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    await db.update(users).set({ stripeCustomerId }).where(eq(users.id, userId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update stripeCustomerId:", error);
+    return false;
+  }
+}
+
+export async function getSubscriptionByStripeId(stripeSubscriptionId: string) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db
+    .select()
+    .from(subscriptions)
+    .where(eq(subscriptions.stripeSubscriptionId, stripeSubscriptionId))
+    .limit(1);
+  return result[0] ?? null;
+}
+
+export async function getSubscriptionsByStripeSubId(stripeSubscriptionId: string) {
+  const db = await getDb();
+  if (!db) return [];
+  return await db
+    .select()
+    .from(subscriptions)
+    .where(eq(subscriptions.stripeSubscriptionId, stripeSubscriptionId));
+}
+
+export async function getSubscriptionByStripeItemId(stripeItemId: string) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db
+    .select()
+    .from(subscriptions)
+    .where(eq(subscriptions.stripeItemId, stripeItemId))
+    .limit(1);
+  return result[0] ?? null;
+}
+
+export async function getPaymentByStripeInvoiceId(stripeInvoiceId: string) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db
+    .select()
+    .from(payments)
+    .where(eq(payments.stripeInvoiceId, stripeInvoiceId))
+    .limit(1);
+  return result[0] ?? null;
 }
 
 export async function getSessionStatsBySubscription(subscriptionId: number) {
@@ -1811,10 +2012,16 @@ export async function getCompletedSessionsByTutorId(tutorId: number) {
       session: sessions,
       courseTitle: sql<string | null>`COALESCE(${subscriptionCourses.title}, ${sessionCourses.title})`.as('courseTitle'),
       courseSubject: sql<string | null>`COALESCE(${subscriptionCourses.subject}, ${sessionCourses.subject})`.as('courseSubject'),
+      courseQuizEnabled: sql<boolean | null>`COALESCE(${subscriptionCourses.quizEnabled}, ${sessionCourses.quizEnabled})`.as('courseQuizEnabled'),
       tutorName: tutorUsers.name,
       parentName: parentUsers.name,
       studentFirstName: sql<string | null>`COALESCE(${sessions.studentFirstName}, ${subscriptions.studentFirstName})`.as('studentFirstName'),
       studentLastName: sql<string | null>`COALESCE(${sessions.studentLastName}, ${subscriptions.studentLastName})`.as('studentLastName'),
+      hasQuiz: sql<boolean>`${sessionQuizzes.id} IS NOT NULL`.as('hasQuiz'),
+      quizStatus: sessionQuizzes.status,
+      quizScore: sessionQuizzes.score,
+      quizCorrectCount: sessionQuizzes.correctCount,
+      quizTotalCount: sessionQuizzes.totalCount,
     })
     .from(sessions)
     .leftJoin(subscriptions, eq(sessions.subscriptionId, subscriptions.id))
@@ -1822,6 +2029,7 @@ export async function getCompletedSessionsByTutorId(tutorId: number) {
     .leftJoin(sessionCourses, eq(sessions.courseId, sessionCourses.id))
     .leftJoin(tutorUsers, eq(sessions.tutorId, tutorUsers.id))
     .leftJoin(parentUsers, eq(sessions.parentId, parentUsers.id))
+    .leftJoin(sessionQuizzes, eq(sessionQuizzes.sessionId, sessions.id))
     .where(and(
       eq(sessions.tutorId, tutorId),
       or(
@@ -1895,9 +2103,13 @@ export async function createConversation(conversation: InsertConversation) {
 
   if (!insertId) {
     // Driver didn't return insertId — fetch the row we just inserted
+    if (conversation.conversationType === 'parent_coordinator' && conversation.coordinatorId) {
+      const fetched = await getConversationByParentAndCoordinator(conversation.parentId, conversation.coordinatorId);
+      return fetched ? fetched.id : null;
+    }
     const fetched = await getConversationByStudentAndTutor(
       conversation.parentId,
-      conversation.tutorId,
+      conversation.tutorId!,
       conversation.studentId!
     );
     return fetched ? fetched.id : null;
@@ -2231,6 +2443,12 @@ export async function getPaymentsByParentId(parentId: number) {
   if (!db) return [];
 
   return await db.select().from(payments).where(eq(payments.parentId, parentId)).orderBy(desc(payments.createdAt));
+}
+
+export async function getPaymentsBySubscriptionId(subscriptionId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return await db.select().from(payments).where(eq(payments.subscriptionId, subscriptionId));
 }
 
 export async function getPaymentsByTutorId(tutorId: number) {
@@ -3898,6 +4116,7 @@ export async function getParentPayments(parentId: number) {
         currency: payments.currency,
         status: payments.status,
         stripePaymentIntentId: payments.stripePaymentIntentId,
+        stripeInvoiceId: payments.stripeInvoiceId,
         createdAt: payments.createdAt,
         sessionId: payments.sessionId,
         tutorName: users.name,
@@ -4680,5 +4899,510 @@ export async function getParentCoordinatorConversation(parentId: number) {
     .limit(1);
 
   return results[0] ?? null;
+}
+
+// ============ Session Quizzes ============
+
+export async function getQuizBySessionId(sessionId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const results = await db
+    .select()
+    .from(sessionQuizzes)
+    .where(eq(sessionQuizzes.sessionId, sessionId))
+    .limit(1);
+  return results[0] ?? null;
+}
+
+export async function getQuizById(quizId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const results = await db
+    .select()
+    .from(sessionQuizzes)
+    .where(eq(sessionQuizzes.id, quizId))
+    .limit(1);
+  return results[0] ?? null;
+}
+
+export async function getQuizzesByParentId(parentId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return await db
+    .select()
+    .from(sessionQuizzes)
+    .where(eq(sessionQuizzes.parentId, parentId))
+    .orderBy(desc(sessionQuizzes.createdAt));
+}
+
+export async function upsertSessionQuiz(quiz: InsertSessionQuiz) {
+  const db = await getDb();
+  if (!db) return null;
+  try {
+    const existing = await getQuizBySessionId(quiz.sessionId as number);
+    if (existing && existing.status === "draft") {
+      await db
+        .update(sessionQuizzes)
+        .set({ questions: quiz.questions, updatedAt: new Date() })
+        .where(eq(sessionQuizzes.id, existing.id));
+      return existing.id;
+    }
+    const result = await db.insert(sessionQuizzes).values(quiz) as any;
+    return Number(result[0].insertId);
+  } catch (error) {
+    console.error("[Database] Failed to upsert session quiz:", error);
+    return null;
+  }
+}
+
+export async function approveAndAssignQuiz(quizId: number, questions: string) {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    await db
+      .update(sessionQuizzes)
+      .set({
+        questions,
+        status: "approved",
+        assignedAt: new Date(),
+        parentNotified: true,
+        updatedAt: new Date(),
+      })
+      .where(eq(sessionQuizzes.id, quizId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to approve quiz:", error);
+    return false;
+  }
+}
+
+export async function completeQuiz(quizId: number, score: number, correctCount: number, totalCount: number, studentAnswers: string) {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    await db
+      .update(sessionQuizzes)
+      .set({ status: "completed", completedAt: new Date(), updatedAt: new Date(), score, correctCount, totalCount, studentAnswers })
+      .where(eq(sessionQuizzes.id, quizId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to complete quiz:", error);
+    return false;
+  }
+}
+
+export async function updateCourseQuizEnabled(courseId: number, quizEnabled: boolean) {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    await db
+      .update(courses)
+      .set({ quizEnabled })
+      .where(eq(courses.id, courseId));
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to update course quizEnabled:", error);
+    return false;
+  }
+}
+
+// ============ Referral & Coupon Management ============
+
+function generateShortCode(length: number): string {
+  return crypto.randomBytes(length).toString("base64url").slice(0, length).toUpperCase();
+}
+
+export async function generateUniqueReferralCode(): Promise<string> {
+  const db = await getDb();
+  if (!db) return generateShortCode(8);
+  for (let i = 0; i < 10; i++) {
+    const code = generateShortCode(8);
+    const existing = await db.select({ id: users.id }).from(users).where(eq(users.referralCode, code)).limit(1);
+    if (existing.length === 0) return code;
+  }
+  return generateShortCode(12);
+}
+
+export async function setUserReferralCode(userId: number, code: string) {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    await db.update(users).set({ referralCode: code }).where(eq(users.id, userId));
+    return true;
+  } catch { return false; }
+}
+
+export async function setUserReferredBy(userId: number, referralCode: string) {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    await db.update(users).set({ referredBy: referralCode }).where(eq(users.id, userId));
+    return true;
+  } catch { return false; }
+}
+
+export async function getUserByReferralCode(code: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(users).where(eq(users.referralCode, code)).limit(1);
+  return result[0];
+}
+
+export async function createReferral(input: { referrerId: number; invitedEmail: string }) {
+  const db = await getDb();
+  if (!db) return null;
+  try {
+    await db.insert(referrals).values({
+      referrerId: input.referrerId,
+      invitedEmail: input.invitedEmail.toLowerCase().trim(),
+      status: "pending",
+    });
+    const created = await db
+      .select()
+      .from(referrals)
+      .where(and(eq(referrals.referrerId, input.referrerId), eq(referrals.invitedEmail, input.invitedEmail.toLowerCase().trim())))
+      .limit(1);
+    return created[0] ?? null;
+  } catch (error) {
+    console.error("[Database] Failed to create referral:", error);
+    return null;
+  }
+}
+
+export async function getReferralByInvitedEmail(email: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db
+    .select()
+    .from(referrals)
+    .where(eq(referrals.invitedEmail, email.toLowerCase().trim()))
+    .limit(1);
+  return result[0];
+}
+
+export async function getReferralsByReferrer(referrerId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select({
+      referral: referrals,
+      referredUser: {
+        id: users.id,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        email: users.email,
+      },
+    })
+    .from(referrals)
+    .leftJoin(users, eq(referrals.referredUserId, users.id))
+    .where(eq(referrals.referrerId, referrerId))
+    .orderBy(desc(referrals.createdAt));
+}
+
+export async function updateReferralSignedUp(invitedEmail: string, referredUserId: number) {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    await db
+      .update(referrals)
+      .set({ status: "signed_up", referredUserId })
+      .where(and(eq(referrals.invitedEmail, invitedEmail.toLowerCase().trim()), eq(referrals.status, "pending")));
+    return true;
+  } catch { return false; }
+}
+
+export async function updateReferralRewarded(referralId: number) {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    await db.update(referrals).set({ status: "rewarded" }).where(eq(referrals.id, referralId));
+    return true;
+  } catch { return false; }
+}
+
+export async function getReferralByReferredUserId(referredUserId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db
+    .select()
+    .from(referrals)
+    .where(eq(referrals.referredUserId, referredUserId))
+    .limit(1);
+  return result[0];
+}
+
+export async function getAllReferrals() {
+  const db = await getDb();
+  if (!db) return [];
+  const referrerUsers = alias(users, "referrer");
+  const referredUsers = alias(users, "referred");
+  return db
+    .select({
+      id: referrals.id,
+      status: referrals.status,
+      createdAt: referrals.createdAt,
+      referrerEmail: referrerUsers.email,
+      referrerName: sql<string>`CONCAT(${referrerUsers.firstName}, ' ', ${referrerUsers.lastName})`,
+      referredEmail: referredUsers.email,
+      referredName: sql<string>`CONCAT(${referredUsers.firstName}, ' ', ${referredUsers.lastName})`,
+    })
+    .from(referrals)
+    .leftJoin(referrerUsers, eq(referrals.referrerId, referrerUsers.id))
+    .leftJoin(referredUsers, eq(referrals.referredUserId, referredUsers.id))
+    .orderBy(desc(referrals.createdAt));
+}
+
+export async function hasUserAlreadyEnrolled(parentId: number): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+  const result = await db
+    .select({ id: subscriptions.id })
+    .from(subscriptions)
+    .where(and(eq(subscriptions.parentId, parentId), ne(subscriptions.status, "cancelled")))
+    .limit(2);
+  // More than 1 means this is NOT the first enrollment (first one was just created)
+  return result.length > 1;
+}
+
+async function generateUniqueCouponCode(): Promise<string> {
+  const db = await getDb();
+  if (!db) return generateShortCode(10);
+  for (let i = 0; i < 10; i++) {
+    const code = "REF-" + generateShortCode(6);
+    const existing = await db.select({ id: coupons.id }).from(coupons).where(eq(coupons.code, code)).limit(1);
+    if (existing.length === 0) return code;
+  }
+  return "REF-" + generateShortCode(10);
+}
+
+export async function createCoupon(input: {
+  userId: number;
+  sourceReferralId?: number;
+  // Amounts are set to 0 at creation; actual discount determined at enrollment based on course price
+  discountAmountUsd?: number;
+  discountAmountInr?: number;
+}) {
+  const db = await getDb();
+  if (!db) return null;
+  try {
+    const code = await generateUniqueCouponCode();
+    await db.insert(coupons).values({
+      code,
+      userId: input.userId,
+      discountAmountUsd: (input.discountAmountUsd ?? 0).toFixed(2),
+      discountAmountInr: (input.discountAmountInr ?? 0).toFixed(2),
+      isUsed: false,
+      sourceReferralId: input.sourceReferralId ?? null,
+    });
+    const created = await db.select().from(coupons).where(eq(coupons.code, code)).limit(1);
+    return created[0] ?? null;
+  } catch (error) {
+    console.error("[Database] Failed to create coupon:", error);
+    return null;
+  }
+}
+
+// ---- Referral Settings ----
+
+export async function getReferralSettings(): Promise<ReferralSetting[]> {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(referralSettings).orderBy(asc(referralSettings.sortOrder));
+}
+
+export async function upsertReferralSettings(tiers: Array<{
+  id?: number;
+  maxPriceUsd: number | null;
+  discountAmountUsd: number;
+  discountAmountInr: number;
+  label: string;
+  sortOrder: number;
+}>) {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    // Delete all and re-insert for simplicity
+    await db.delete(referralSettings);
+    if (tiers.length > 0) {
+      await db.insert(referralSettings).values(tiers.map(t => ({
+        maxPriceUsd: t.maxPriceUsd != null ? t.maxPriceUsd.toFixed(2) : null,
+        discountAmountUsd: t.discountAmountUsd.toFixed(2),
+        discountAmountInr: t.discountAmountInr.toFixed(2),
+        label: t.label,
+        sortOrder: t.sortOrder,
+      })));
+    }
+    return true;
+  } catch (error) {
+    console.error("[Database] Failed to upsert referral settings:", error);
+    return false;
+  }
+}
+
+/**
+ * Given a course price in USD, return the matching discount tier amounts.
+ * Tiers are sorted by sortOrder; first tier where price <= maxPriceUsd wins.
+ * The last tier (maxPriceUsd = null) is the catch-all for the highest prices.
+ */
+export async function getReferralDiscountForPrice(priceUsd: number): Promise<{ usd: number; inr: number }> {
+  const tiers = await getReferralSettings();
+  if (!tiers.length) return { usd: 0, inr: 0 };
+  for (const tier of tiers) {
+    if (tier.maxPriceUsd === null || priceUsd <= parseFloat(tier.maxPriceUsd)) {
+      return {
+        usd: parseFloat(tier.discountAmountUsd),
+        inr: parseFloat(tier.discountAmountInr),
+      };
+    }
+  }
+  // Fallback to last tier
+  const last = tiers[tiers.length - 1];
+  return { usd: parseFloat(last.discountAmountUsd), inr: parseFloat(last.discountAmountInr) };
+}
+
+export async function getCouponByCode(code: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(coupons).where(eq(coupons.code, code.trim().toUpperCase())).limit(1);
+  return result[0];
+}
+
+export async function getCouponsByUserId(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(coupons).where(eq(coupons.userId, userId)).orderBy(desc(coupons.createdAt));
+}
+
+export async function markCouponUsed(couponId: number) {
+  const db = await getDb();
+  if (!db) return false;
+  try {
+    await db.update(coupons).set({ isUsed: true, usedAt: new Date() }).where(eq(coupons.id, couponId));
+    return true;
+  } catch { return false; }
+}
+
+export async function updateCouponAmounts(couponId: number, amounts: { usd: number; inr: number }) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(coupons).set({
+    discountAmountUsd: amounts.usd.toFixed(2),
+    discountAmountInr: amounts.inr.toFixed(2),
+  }).where(eq(coupons.id, couponId));
+}
+
+// ============ Session Rubric Grading ============
+
+export interface RubricGradeEntry {
+  criterion: string;
+  score: number;
+  evidence: string;
+}
+
+export interface RubricGradePayload {
+  sessionId: number;
+  recordingId?: string | null;
+  academicEfficiency: number;
+  instructionalQuality: number;
+  strategyInsight: number;
+  synthesisBranding: number;
+  evidence: RubricGradeEntry[];
+  overallScore: number;
+  overallNarrative: string;
+  transcriptQuality: "high" | "medium" | "low";
+  transcriptQualityReason: string;
+}
+
+export async function saveSessionRubricGrades(payload: RubricGradePayload) {
+  const db = await getDb();
+  if (!db) return null;
+  try {
+    const evidenceJson = JSON.stringify(payload.evidence);
+    const now = new Date();
+
+    // Check if a row already exists for this session
+    const existing = await db
+      .select({ id: sessionAIInsights.id })
+      .from(sessionAIInsights)
+      .where(eq(sessionAIInsights.sessionId, payload.sessionId))
+      .limit(1);
+
+    if (existing.length > 0) {
+      await db.update(sessionAIInsights).set({
+        rubricAcademicEfficiency: payload.academicEfficiency,
+        rubricInstructionalQuality: payload.instructionalQuality,
+        rubricStrategyInsight: payload.strategyInsight,
+        rubricSynthesisBranding: payload.synthesisBranding,
+        rubricEvidence: evidenceJson,
+        rubricOverallScore: payload.overallScore.toFixed(2),
+        rubricGradedAt: now,
+        rubricTranscriptQuality: payload.transcriptQuality,
+        rubricTranscriptQualityReason: payload.transcriptQualityReason,
+      }).where(eq(sessionAIInsights.sessionId, payload.sessionId));
+      return existing[0].id;
+    } else {
+      const [result] = await db.insert(sessionAIInsights).values({
+        recordingId: payload.recordingId ?? null,
+        sessionId: payload.sessionId,
+        rubricAcademicEfficiency: payload.academicEfficiency,
+        rubricInstructionalQuality: payload.instructionalQuality,
+        rubricStrategyInsight: payload.strategyInsight,
+        rubricSynthesisBranding: payload.synthesisBranding,
+        rubricEvidence: evidenceJson,
+        rubricOverallScore: payload.overallScore.toFixed(2),
+        rubricGradedAt: now,
+        rubricTranscriptQuality: payload.transcriptQuality,
+        rubricTranscriptQualityReason: payload.transcriptQualityReason,
+      });
+      return (result as any).insertId ?? null;
+    }
+  } catch (err) {
+    console.error("[DB] saveSessionRubricGrades error:", err);
+    return null;
+  }
+}
+
+export async function getSessionRubricGrades(sessionId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db
+    .select({
+      rubricAcademicEfficiency: sessionAIInsights.rubricAcademicEfficiency,
+      rubricInstructionalQuality: sessionAIInsights.rubricInstructionalQuality,
+      rubricStrategyInsight: sessionAIInsights.rubricStrategyInsight,
+      rubricSynthesisBranding: sessionAIInsights.rubricSynthesisBranding,
+      rubricEvidence: sessionAIInsights.rubricEvidence,
+      rubricOverallScore: sessionAIInsights.rubricOverallScore,
+      rubricGradedAt: sessionAIInsights.rubricGradedAt,
+      rubricTranscriptQuality: sessionAIInsights.rubricTranscriptQuality,
+      rubricTranscriptQualityReason: sessionAIInsights.rubricTranscriptQualityReason,
+    })
+    .from(sessionAIInsights)
+    .where(and(eq(sessionAIInsights.sessionId, sessionId), isNotNull(sessionAIInsights.rubricGradedAt)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function getRubricGradesByParentId(parentId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return await db
+    .select({
+      sessionId: sessionAIInsights.sessionId,
+      rubricAcademicEfficiency: sessionAIInsights.rubricAcademicEfficiency,
+      rubricInstructionalQuality: sessionAIInsights.rubricInstructionalQuality,
+      rubricStrategyInsight: sessionAIInsights.rubricStrategyInsight,
+      rubricSynthesisBranding: sessionAIInsights.rubricSynthesisBranding,
+      rubricEvidence: sessionAIInsights.rubricEvidence,
+      rubricOverallScore: sessionAIInsights.rubricOverallScore,
+      rubricGradedAt: sessionAIInsights.rubricGradedAt,
+      rubricTranscriptQuality: sessionAIInsights.rubricTranscriptQuality,
+      rubricTranscriptQualityReason: sessionAIInsights.rubricTranscriptQualityReason,
+      scheduledAt: sessions.scheduledAt,
+    })
+    .from(sessionAIInsights)
+    .innerJoin(sessions, eq(sessionAIInsights.sessionId, sessions.id))
+    .where(and(eq(sessions.parentId, parentId), isNotNull(sessionAIInsights.rubricGradedAt)))
+    .orderBy(desc(sessions.scheduledAt));
 }
 

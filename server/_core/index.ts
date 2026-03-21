@@ -38,15 +38,27 @@ async function startServer() {
   const server = createServer(app);
 
   // Security & middleware
-  app.use(helmet());
-  if (process.env.NODE_ENV === "development") {
-    // TEMP: Loosen CSP in dev to satisfy Brave Shields / Vite HMR inline preamble.
-    // Remove before production.
-    app.use((_, res, next) => {
-      res.setHeader("Content-Security-Policy", "script-src 'self' 'unsafe-inline' 'unsafe-eval'");
-      next();
-    });
-  }
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          imgSrc: ["'self'", "data:", "blob:", "https://*.amazonaws.com"],
+          connectSrc: ["'self'", "https://*.amazonaws.com"],
+          fontSrc: ["'self'", "data:"],
+          objectSrc: ["'none'"],
+          frameAncestors: ["'none'"],
+        },
+      },
+    })
+  );
+  // Stripe webhook MUST be registered before CORS and express.json() middleware
+  // Stripe sends from its own servers so CORS must not apply here
+  const { handleStripeWebhook } = await import("../stripeWebhook");
+  app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), handleStripeWebhook);
+
   app.use(
     cors({
       origin: ENV.corsOrigin,
@@ -59,10 +71,22 @@ async function startServer() {
     windowMs: 15 * 60 * 1000,
     limit: 100,
   });
-  
-  // Stripe webhook MUST be registered before express.json() for signature verification
-  const { handleStripeWebhook } = await import("../stripeWebhook");
-  app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), handleStripeWebhook);
+
+  // Local dev storage shim must be registered BEFORE express.json() so it can
+  // read the raw multipart body itself. Active only when Forge URL is localhost.
+  if (process.env.NODE_ENV !== "production") {
+    const forgeUrl = (process.env.BUILT_IN_FORGE_API_URL ?? "").replace(/\/+$/, "");
+    const localPrefixes = ["http://localhost", "http://127.0.0.1", ""];
+    const isLocalForge = localPrefixes.some(p => forgeUrl === p || forgeUrl.startsWith(p + ":"));
+    if (isLocalForge) {
+      const { createLocalDevStorageRouter, createLocalDevStaticRouter } = await import("../localDevStorage");
+      const preferredPort = parseInt(process.env.PORT || "3000");
+      const devBaseUrl = forgeUrl || `http://localhost:${preferredPort}`;
+      app.use(createLocalDevStorageRouter(devBaseUrl));
+      app.use(createLocalDevStaticRouter());
+      console.log(`[LocalDevStorage] Active — files saved to uploads/, served at ${devBaseUrl}/uploads/`);
+    }
+  }
 
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
@@ -79,7 +103,7 @@ async function startServer() {
   // PDF download route
   const { pdfRouter } = await import("../pdfRoute");
   app.use("/api/pdf", pdfRouter);
-  
+
   // tRPC API
   app.use(
     "/api/trpc",

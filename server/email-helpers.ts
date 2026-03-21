@@ -4,6 +4,8 @@
  */
 
 import { emailService } from './email-service';
+import { formatInTimeZone } from 'date-fns-tz';
+import { COMMON_TIMEZONES } from '../shared/timezone-utils';
 import {
   getWelcomeEmail,
   getBookingConfirmationEmail,
@@ -13,7 +15,12 @@ import {
   getPasswordSetupEmail,
   getCoordinatorPasswordSetupEmail,
   getEmailVerificationEmail,
-  getNoShowNotificationEmail
+  getNoShowNotificationEmail,
+  getTutorApplicationReceivedEmail,
+  getPasswordResetEmail,
+  getReferralInviteEmail,
+  getReferralWelcomeEmail,
+  getCouponRewardEmail,
 } from './email-templates';
 
 const BASE_URL = process.env.VITE_FRONTEND_FORGE_API_URL || 'http://localhost:3000';
@@ -86,6 +93,7 @@ interface SendBookingConfirmationParams {
   sessionTime: string;
   sessionDuration: string;
   sessionPrice: string;
+  additionalSessions?: { date: string; time: string }[];
 }
 
 /**
@@ -103,11 +111,12 @@ export async function sendBookingConfirmation(params: SendBookingConfirmationPar
     sessionTime,
     sessionDuration,
     sessionPrice,
+    additionalSessions,
   } = params;
-  
+
   const dashboardUrl = emailRedirect("/dashboard");
   const messagesUrl = emailRedirect("/messages");
-  
+
   const html = getBookingConfirmationEmail({
     userName,
     userRole,
@@ -120,11 +129,17 @@ export async function sendBookingConfirmation(params: SendBookingConfirmationPar
     sessionPrice,
     dashboardUrl,
     messagesUrl,
+    additionalSessions,
   });
-  
+
+  const totalSessions = additionalSessions && additionalSessions.length > 0 ? 1 + additionalSessions.length : 1;
+  const subject = totalSessions > 1
+    ? `${totalSessions} Sessions Confirmed: ${courseName} starting ${sessionDate}`
+    : `Session Confirmed: ${courseName} on ${sessionDate}`;
+
   return await emailService.sendEmail({
     to: userEmail,
-    subject: `Session Confirmed: ${courseName} on ${sessionDate}`,
+    subject,
     html,
   });
 }
@@ -233,18 +248,13 @@ export function formatEmailDate(date: Date, timezone?: string): string {
  * @param timezone - Optional timezone (e.g., 'America/New_York'). If not provided, uses local system time.
  */
 export function formatEmailTime(date: Date, timezone?: string): string {
-  const options: Intl.DateTimeFormatOptions = {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  };
-
-  // Only add timeZone if provided, otherwise use local time
   if (timezone) {
-    options.timeZone = timezone;
+    const time = formatInTimeZone(date, timezone, 'h:mm a');
+    const tz = COMMON_TIMEZONES.find(t => t.value === timezone);
+    const abbr = tz ? (tz.label.match(/\(([^)]+)\)$/)?.[1] ?? '') : '';
+    return abbr ? `${time} ${abbr}` : formatInTimeZone(date, timezone, 'h:mm a zzz');
   }
-
-  return date.toLocaleTimeString('en-US', options);
+  return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
 }
 
 /**
@@ -364,6 +374,92 @@ export async function sendNoShowNotification(params: SendNoShowNotificationParam
   return await emailService.sendEmail({
     to: parentEmail,
     subject: `⚠️ Session No-Show Notification - ${courseName}`,
+    html,
+  });
+}
+
+export async function sendTutorApplicationReceivedEmail(params: {
+  tutorName: string;
+  tutorEmail: string;
+  subjects: string[];
+}): Promise<boolean> {
+  const html = getTutorApplicationReceivedEmail(params);
+  return await emailService.sendEmail({
+    to: params.tutorEmail,
+    subject: '✅ We received your tutor application - EdKonnect Academy',
+    html,
+  });
+}
+
+export async function sendPasswordResetEmail(params: {
+  userEmail: string;
+  userName: string;
+  resetUrl: string;
+  expiresAt: Date;
+}): Promise<boolean> {
+  const html = getPasswordResetEmail({
+    userName: params.userName,
+    resetUrl: params.resetUrl,
+    expiresAt: params.expiresAt,
+  });
+  return await emailService.sendEmail({
+    to: params.userEmail,
+    subject: 'Reset your EdKonnect Academy password',
+    html,
+  });
+}
+
+// ============ Referral Emails ============
+
+export async function sendReferralInviteEmail(params: {
+  invitedEmail: string;
+  referrerName: string;
+  signupUrl: string;
+}): Promise<boolean> {
+  const html = getReferralInviteEmail({
+    invitedEmail: params.invitedEmail,
+    referrerName: params.referrerName,
+    signupUrl: params.signupUrl,
+  });
+  return await emailService.sendEmail({
+    to: params.invitedEmail,
+    subject: `${params.referrerName} invited you to EdKonnect Academy`,
+    html,
+  });
+}
+
+export async function sendReferralWelcomeEmail(params: {
+  userEmail: string;
+  userName: string;
+  referrerName: string;
+}): Promise<boolean> {
+  const html = getReferralWelcomeEmail({
+    userName: params.userName,
+    referrerName: params.referrerName,
+  });
+  return await emailService.sendEmail({
+    to: params.userEmail,
+    subject: 'Welcome to EdKonnect Academy — your reward is waiting!',
+    html,
+  });
+}
+
+export async function sendCouponRewardEmail(params: {
+  userEmail: string;
+  userName: string;
+  couponCode: string;
+  reason: 'referrer' | 'referred';
+  friendName?: string;
+}): Promise<boolean> {
+  const html = getCouponRewardEmail({
+    userName: params.userName,
+    couponCode: params.couponCode,
+    reason: params.reason,
+    friendName: params.friendName,
+  });
+  return await emailService.sendEmail({
+    to: params.userEmail,
+    subject: `Your referral discount coupon — ${params.couponCode}`,
     html,
   });
 }

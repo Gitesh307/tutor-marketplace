@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
+import { useAuth } from "@/_core/hooks/useAuth";
 import { Calendar as CalendarIcon, Clock, AlertCircle, Globe } from "lucide-react";
 import { format } from "date-fns";
 import crypto from "crypto-js";
@@ -27,7 +28,8 @@ import {
   COMMON_TIMEZONES,
   detectUserTimezone,
   convertToUTC,
-  convertFromUTC
+  convertFromUTC,
+  createTimestamp,
 } from "@/../../shared/timezone-utils";
 
 interface AppointmentSchedulerProps {
@@ -40,6 +42,7 @@ interface AppointmentSchedulerProps {
 }
 
 export function AppointmentScheduler({ subscriptions, onScheduleComplete }: AppointmentSchedulerProps) {
+  const { user } = useAuth();
   const [selectedSubscriptionId, setSelectedSubscriptionId] = useState<number | null>(null);
   const [selectedDate, setSelectedDate] = useState<Date | undefined>(undefined);
   const [selectedTimeSlot, setSelectedTimeSlot] = useState<string>("");
@@ -83,18 +86,18 @@ export function AppointmentScheduler({ subscriptions, onScheduleComplete }: Appo
 
   // Determine timezones
   const tutorTimezone = tutorProfile?.timezone || detectUserTimezone();
-  const parentTimezone = parentProfile?.timezone || detectUserTimezone();
+  // user.timezone is kept up-to-date by Settings page (refreshProfile called on save)
+  // parentProfile.timezone may be stale if the tRPC cache hasn't been invalidated yet
+  const parentTimezone = user?.timezone || parentProfile?.timezone || detectUserTimezone();
 
-  // Get timezone abbreviation for parent
+  // Get timezone abbreviation for parent e.g. "EST", "IST"
   const parentTimezoneAbbr = useMemo(() => {
-    try {
-      return new Date().toLocaleTimeString('en-US', {
-        timeZone: parentTimezone,
-        timeZoneName: 'short'
-      }).split(' ').pop() || '';
-    } catch {
-      return '';
+    const tz = COMMON_TIMEZONES.find(t => t.value === parentTimezone);
+    if (tz) {
+      const match = tz.label.match(/\(([^)]+)\)$/);
+      return match ? match[1] : tz.label;
     }
+    return '';
   }, [parentTimezone]);
 
   // Get friendly timezone label
@@ -162,12 +165,15 @@ export function AppointmentScheduler({ subscriptions, onScheduleComplete }: Appo
           const tutorHour = Math.floor(cursor / 60);
           const tutorMinute = cursor % 60;
 
-          // Create date in tutor's timezone
-          const tutorSlotDate = new Date(checkDateInTutorTZ);
-          tutorSlotDate.setHours(tutorHour, tutorMinute, 0, 0);
-
-          // Convert to UTC
-          const slotTimestampUTC = convertToUTC(tutorSlotDate, tutorTimezone);
+          // Convert slot time to UTC using tutor's timezone directly
+          const slotTimestampUTC = createTimestamp(
+            checkDateInTutorTZ.getFullYear(),
+            checkDateInTutorTZ.getMonth(),
+            checkDateInTutorTZ.getDate(),
+            tutorHour,
+            tutorMinute,
+            tutorTimezone
+          );
 
           // Convert to parent's timezone for display
           const slotInParentTZ = convertFromUTC(slotTimestampUTC, parentTimezone);
@@ -482,7 +488,7 @@ export function AppointmentScheduler({ subscriptions, onScheduleComplete }: Appo
                               : "bg-background hover:bg-muted border-border"
                           }`}
                         >
-                          {time}
+                          {time}{parentTimezoneAbbr && <span className="ml-1 text-xs opacity-70">{parentTimezoneAbbr}</span>}
                         </button>
                       ))
                     )}

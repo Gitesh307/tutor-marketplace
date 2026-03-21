@@ -3,7 +3,7 @@ import { z } from "zod";
 import { authSchema, clearAuthCookies, setAuthCookies, verifyPassword, verifyRefreshToken } from "../services/authService";
 import * as db from "../../db";
 import { REFRESH_TOKEN_COOKIE } from "@shared/const";
-import { sendVerificationEmail } from "../../email-helpers";
+import { sendVerificationEmail, sendCouponRewardEmail } from "../../email-helpers";
 
 export const authRouter = express.Router();
 
@@ -14,10 +14,24 @@ authRouter.post("/signup", async (req, res) => {
     return res.status(400).json({ error: firstError });
   }
   const { email, password, firstName, lastName, role, timezone } = parsed.data;
+  const refCode = typeof req.body.refCode === "string" ? req.body.refCode.trim().toUpperCase() : null;
 
   const existing = await db.getUserByEmail(email);
   if (existing) {
     return res.status(409).json({ error: "Email already registered" });
+  }
+
+  // Validate referral code if provided
+  let referrer = null;
+  if (refCode) {
+    referrer = await db.getUserByReferralCode(refCode);
+    if (!referrer) {
+      return res.status(400).json({ error: "Invalid referral code." });
+    }
+    // Prevent self-referral
+    if (referrer.email.toLowerCase() === email.toLowerCase()) {
+      return res.status(400).json({ error: "You cannot refer yourself." });
+    }
   }
 
   const passwordHash = await (await import("../services/authService")).hashPassword(password);
@@ -34,6 +48,42 @@ authRouter.post("/signup", async (req, res) => {
     return res.status(500).json({ error: "Failed to create user" });
   }
 
+  // Generate unique referral code for new user
+  try {
+    const newRefCode = await db.generateUniqueReferralCode();
+    await db.setUserReferralCode(user.id, newRefCode);
+  } catch (err) {
+    console.error("[Auth] Failed to generate referral code:", err);
+  }
+
+  // Link referral if code was provided, then issue coupon to referred user immediately
+  if (refCode && referrer) {
+    try {
+      await db.setUserReferredBy(user.id, refCode);
+      await db.updateReferralSignedUp(email, user.id);
+
+      // Issue coupon to referred user right away (amounts are 0; resolved at enrollment based on course price)
+      const referral = await db.getReferralByReferredUserId(user.id);
+      if (referral) {
+        const coupon = await db.createCoupon({
+          userId: user.id,
+          sourceReferralId: referral.id,
+        });
+        if (coupon) {
+          const userName = `${user.firstName} ${user.lastName}`.trim();
+          await sendCouponRewardEmail({
+            userEmail: user.email || email,
+            userName,
+            couponCode: coupon.code,
+            reason: "referred",
+          }).catch(err => console.error("[Auth] Failed to send coupon email to referred user:", err));
+        }
+      }
+    } catch (err) {
+      console.error("[Auth] Failed to link referral:", err);
+    }
+  }
+
   try {
     const token = await db.createEmailVerificationToken(user.id);
     if (token) {
@@ -46,6 +96,11 @@ authRouter.post("/signup", async (req, res) => {
     }
   } catch (err) {
     console.error("[Auth] Failed to send verification email:", err);
+  }
+
+  // Save timezone to users table so it's returned by getUserById
+  if (timezone) {
+    try { await db.updateUserTimezone(user.id, timezone); } catch {}
   }
 
   // Create a basic profile matching the selected role
@@ -101,14 +156,16 @@ authRouter.post("/login", async (req, res) => {
     return res.status(403).json({ error: "Please verify your email before logging in." });
   }
 
+  const previousLastSignedIn = await db.updateUserLastSignedIn(user.id);
+
   await setAuthCookies(req, res, {
     sub: user.id,
     email: user.email || "",
-    role: user.role as "parent" | "tutor" | "admin",
+    role: user.role as "parent" | "tutor" | "admin" | "coordinator",
   });
 
   const { passwordHash: _pw2, ...safeUser } = user as any;
-  res.json({ user: safeUser });
+  res.json({ user: safeUser, previousLastSignedIn: previousLastSignedIn ? previousLastSignedIn.toISOString() : null });
 });
 
 authRouter.post("/logout", async (req, res) => {
@@ -262,6 +319,80 @@ authRouter.post("/setup-password", async (req, res) => {
 /**
  * Resend password setup link for approved tutors who haven't completed setup
  */
+/**
+ * Request a password reset email
+ */
+authRouter.post("/forgot-password", async (req, res) => {
+  const schema = z.object({ email: z.string().email() });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Valid email is required" });
+  }
+
+  const { email } = parsed.data;
+
+  // Always return success to avoid leaking whether email exists
+  const user = await db.getUserByEmail(email);
+  if (!user || !user.emailVerified) {
+    return res.json({ success: true, message: "If an account exists for this email, a reset link has been sent." });
+  }
+
+  const token = await db.createPasswordResetToken(user.id);
+  if (!token) {
+    return res.status(500).json({ error: "Failed to generate reset link. Please try again." });
+  }
+
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+  const resetUrl = `${process.env.VITE_FRONTEND_FORGE_API_URL || "http://localhost:3000"}/reset-password?token=${token}`;
+
+  try {
+    const { sendPasswordResetEmail } = await import("../../email-helpers");
+    await sendPasswordResetEmail({
+      userEmail: user.email,
+      userName: user.name || user.firstName || "there",
+      resetUrl,
+      expiresAt,
+    });
+  } catch (err) {
+    console.error("[ForgotPassword] Failed to send email:", err);
+    return res.status(500).json({ error: "Failed to send reset email. Please try again." });
+  }
+
+  res.json({ success: true, message: "If an account exists for this email, a reset link has been sent." });
+});
+
+/**
+ * Reset password using token from email
+ */
+authRouter.post("/reset-password", async (req, res) => {
+  const schema = z.object({
+    token: z.string(),
+    password: z.string().min(8, "Password must be at least 8 characters"),
+  });
+
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.issues[0]?.message || "Invalid input" });
+  }
+
+  const { token, password } = parsed.data;
+
+  const tokenRecord = await db.validatePasswordResetToken(token);
+  if (!tokenRecord) {
+    return res.status(400).json({ error: "Invalid or expired reset link. Please request a new one." });
+  }
+
+  const authService = await import("../services/authService");
+  const passwordHash = await authService.hashPassword(password);
+
+  const user = await db.consumePasswordResetToken(token, passwordHash);
+  if (!user) {
+    return res.status(500).json({ error: "Failed to reset password. Please try again." });
+  }
+
+  res.json({ success: true, message: "Password reset successfully. You can now sign in." });
+});
+
 authRouter.post("/resend-setup-link", async (req, res) => {
   const schema = z.object({
     email: z.string().email(),

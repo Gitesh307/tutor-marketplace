@@ -1,5 +1,6 @@
 import Navigation from "@/components/Navigation";
 import { trpc } from "@/lib/trpc";
+import { useFormatPrice } from "@/hooks/useFormatPrice";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,6 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 export default function TutorListing() {
   const [searchTerm, setSearchTerm] = useState("");
   const { data: tutors, isLoading } = trpc.tutorProfile.list.useQuery();
+  const formatPrice = useFormatPrice();
 
   const filteredTutors = tutors?.filter(tutor => {
     if (!searchTerm) return true;
@@ -39,15 +41,16 @@ export default function TutorListing() {
 
       <div className="flex-1 mt-20">
         {/* Header */}
-        <div className="bg-gradient-to-br from-primary/5 via-accent/5 to-background border-b border-border">
-          <div className="container py-12">
-            <h1 className="text-4xl font-bold mb-4">Find Your Perfect Tutor</h1>
-            <p className="text-lg text-muted-foreground mb-8 max-w-2xl">
+        <section className="bg-gradient-to-br from-primary/5 via-primary/10 to-background py-16 border-b border-border">
+          <div className="container">
+            <div className="max-w-3xl mx-auto text-center">
+            <h1 className="text-4xl md:text-5xl font-bold mb-4 bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent">Find Your Perfect Tutor</h1>
+            <p className="text-lg text-muted-foreground mb-8">
               Browse through our qualified tutors and find the perfect match for your learning needs.
             </p>
 
             {/* Search Bar */}
-            <div className="relative max-w-2xl">
+            <div className="relative max-w-2xl mx-auto">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
               <Input
                 type="text"
@@ -57,8 +60,9 @@ export default function TutorListing() {
                 onChange={(e) => setSearchTerm(e.target.value)}
               />
             </div>
+            </div>
           </div>
-        </div>
+        </section>
 
         {/* Tutor Grid */}
         <div className="container py-12">
@@ -150,17 +154,9 @@ export default function TutorListing() {
                           </div>
                         )}
 
-                        {/* Hourly Rate */}
                         <div className="flex items-center justify-between mt-auto pt-4 border-t border-border">
-                          {hourlyRate > 0 && (
-                            <div className="flex items-center gap-1 text-lg font-semibold text-primary">
-                              <DollarSign className="w-5 h-5" />
-                              <span>{hourlyRate}</span>
-                              <span className="text-sm text-muted-foreground font-normal">/hour</span>
-                            </div>
-                          )}
                           <Button asChild size="sm" className="ml-auto">
-                            <Link href={`/tutor-profile/${tutor.id}`}>
+                            <Link href={`/tutor/${tutor.userId}`}>
                               View Profile
                             </Link>
                           </Button>

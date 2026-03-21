@@ -3,7 +3,7 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { LOGIN_PATH } from "@/const";
 import { Button } from "@/components/ui/button";
 import { Link, useLocation } from "wouter";
-import { GraduationCap, MessageSquare, LayoutDashboard, LogOut, Play, Bell, CreditCard } from "lucide-react";
+import { GraduationCap, MessageSquare, LayoutDashboard, LogOut, Play, Bell, CreditCard, Settings, User, Calendar, Menu, X } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import VideoModal from "@/components/VideoModal";
 import {
@@ -13,16 +13,25 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { NotificationBell } from "@/components/NotificationBell";
 
 export default function Navigation() {
   const { user, isAuthenticated, loading } = useAuth();
+  const role: "parent" | "tutor" | "admin" | "coordinator" | null = user?.role ?? null;
   const [location] = useLocation();
   const [isVideoModalOpen, setIsVideoModalOpen] = React.useState(false);
   const [isVisible, setIsVisible] = React.useState(true);
   const [lastScrollY, setLastScrollY] = React.useState(0);
+  const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
   const logoutMutation = trpc.auth.logout.useMutation();
+
+  // Fetch tutor profile for avatar photo (tutors only)
+  const { data: tutorProfile } = trpc.tutorProfile.getMy.useQuery(undefined, {
+    enabled: isAuthenticated && user?.role === "tutor",
+    staleTime: 60_000,
+  });
+  const avatarImageUrl = user?.role === "tutor" ? (tutorProfile?.profileImageUrl ?? null) : null;
 
   // Scroll behavior for show/hide navbar
   React.useEffect(() => {
@@ -51,7 +60,7 @@ export default function Navigation() {
   const { data: unreadData } = trpc.messaging.getUnreadMessageCount.useQuery(
     undefined,
     {
-      enabled: isAuthenticated && (user?.role === "parent" || user?.role === "tutor" || user?.role === "coordinator"),
+      enabled: isAuthenticated && (role === "parent" || role === "tutor" || role === "coordinator"),
       // Avoid constant polling; refresh on tab focus and every 60s instead of ~5–10s
       refetchOnWindowFocus: true,
       refetchInterval: 60_000,
@@ -65,10 +74,10 @@ export default function Navigation() {
   };
 
   const getDashboardLink = () => {
-    if (user?.role === "admin") return "/admin/dashboard";
-    if (user?.role === "tutor") return "/tutor/dashboard";
-    if (user?.role === "parent") return "/parent/dashboard";
-    if (user?.role === "coordinator") return "/coordinator/dashboard";
+    if (role === "admin") return "/admin/dashboard";
+    if (role === "tutor") return "/tutor/dashboard";
+    if (role === "parent") return "/parent/dashboard";
+    if (role === "coordinator") return "/coordinator/dashboard";
     return "/"; // Default to home if no role assigned
   };
 
@@ -101,7 +110,11 @@ export default function Navigation() {
       }`}
     >
       <div className="mx-4 mt-4">
-        <div className="container mx-auto bg-card/80 backdrop-blur-md border border-border/50 rounded-2xl shadow-lg">
+        <div
+          className="container mx-auto rounded-2xl border border-primary/25 bg-gradient-to-r from-white/92 via-primary/8 to-white/92
+                     dark:from-slate-900/90 dark:via-primary/15 dark:to-slate-900/90
+                     backdrop-blur-lg shadow-xl shadow-primary/10"
+        >
           <div className="flex items-center justify-between h-16 px-6">
           {/* Logo */}
           <Link href="/" className="flex items-center gap-2 text-xl font-semibold text-primary hover:text-primary/80 transition-colors">
@@ -110,9 +123,9 @@ export default function Navigation() {
           </Link>
 
           {/* Navigation Links */}
-          <div className="hidden md:flex items-center gap-6">
+          <div className="hidden lg:flex items-center gap-6">
             {/* For coordinators, only show Dashboard */}
-            {user?.role === "coordinator" ? (
+            {role === "coordinator" ? (
               <Link href={getDashboardLink()} className={`flex items-center gap-2 text-sm font-medium transition-colors hover:text-primary ${
                 location.includes("/dashboard") ? "text-primary" : "text-muted-foreground"
               }`}>
@@ -134,7 +147,7 @@ export default function Navigation() {
                   Browse Courses
                 </Link>
 
-                {user?.role !== "tutor" && (
+                {role !== "tutor" && (
                   <Link href="/tutor-registration" className={`text-sm font-medium transition-colors hover:text-primary ${
                     location === "/tutor-registration" ? "text-primary" : "text-muted-foreground"
                   }`}>
@@ -159,8 +172,8 @@ export default function Navigation() {
                       Dashboard
                     </Link>
 
-                    <Link href={user?.role === 'coordinator' ? '/coordinator/messages' : '/messages'} className={`flex items-center gap-2 text-sm font-medium transition-colors hover:text-primary ${
-                      (user?.role === 'coordinator' ? location === "/coordinator/messages" : location === "/messages") ? "text-primary" : "text-muted-foreground"
+                    <Link href={role === ('coordinator' as typeof role) ? '/coordinator/messages' : '/messages'} className={`flex items-center gap-2 text-sm font-medium transition-colors hover:text-primary ${
+                      (role === ('coordinator' as typeof role) ? location === "/coordinator/messages" : location === "/messages") ? "text-primary" : "text-muted-foreground"
                     }`}>
                       <span className="relative">
                         <MessageSquare className="w-4 h-4" />
@@ -179,7 +192,7 @@ export default function Navigation() {
           </div>
 
           {/* Auth Section */}
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 lg:gap-4">
             {loading ? (
               <div className="w-8 h-8 rounded-full bg-muted animate-pulse" />
             ) : isAuthenticated && user ? (
@@ -191,6 +204,9 @@ export default function Navigation() {
                 <DropdownMenuTrigger asChild>
                   <button className="relative h-10 w-10 rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                     <Avatar>
+                      {avatarImageUrl && (
+                        <AvatarImage src={avatarImageUrl} alt={user.name ?? "Profile photo"} />
+                      )}
                       <AvatarFallback className="bg-primary text-primary-foreground">
                         {getInitials(user.name)}
                       </AvatarFallback>
@@ -241,6 +257,14 @@ export default function Navigation() {
                       </Link>
                     </DropdownMenuItem>
                   )}
+                  {user.role !== 'admin' && (
+                    <DropdownMenuItem asChild>
+                      <Link href="/settings" className="flex items-center w-full cursor-pointer">
+                        <Settings className="w-4 h-4 mr-2" />
+                        Settings
+                      </Link>
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={handleLogout} className="cursor-pointer">
                     <LogOut className="w-4 h-4 mr-2" />
@@ -265,6 +289,18 @@ export default function Navigation() {
                   {user.role === 'tutor' && (
                     <>
                       <DropdownMenuItem asChild>
+                        <Link href="/tutor/profile" className="flex items-center w-full cursor-pointer">
+                          <User className="w-4 h-4 mr-2" />
+                          Profile
+                        </Link>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem asChild>
+                        <Link href="/tutor/availability" className="flex items-center w-full cursor-pointer">
+                          <Calendar className="w-4 h-4 mr-2" />
+                          Availability
+                        </Link>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem asChild>
                         <Link href="/tutor/payments" className="flex items-center w-full cursor-pointer">
                           <CreditCard className="w-4 h-4 mr-2" />
                           Billing
@@ -286,8 +322,62 @@ export default function Navigation() {
                 <a href={LOGIN_PATH}>Sign In</a>
               </Button>
             )}
+            {/* Hamburger — visible below lg */}
+            <button
+              className="lg:hidden p-2 rounded-lg hover:bg-muted transition-colors"
+              onClick={() => setMobileMenuOpen(prev => !prev)}
+              aria-label="Toggle menu"
+            >
+              {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+            </button>
           </div>
         </div>
+
+        {/* Mobile Menu */}
+        {mobileMenuOpen && (
+          <div className="lg:hidden border-t border-border px-6 py-4 flex flex-col gap-3">
+            {role === "coordinator" ? (
+              <Link href={getDashboardLink()} onClick={() => setMobileMenuOpen(false)} className="flex items-center gap-2 text-sm font-medium py-2 hover:text-primary transition-colors">
+                <LayoutDashboard className="w-4 h-4" /> Dashboard
+              </Link>
+            ) : (
+              <>
+                <Link href="/tutors" onClick={() => setMobileMenuOpen(false)} className="text-sm font-medium py-2 hover:text-primary transition-colors">Find Tutors</Link>
+                <Link href="/courses" onClick={() => setMobileMenuOpen(false)} className="text-sm font-medium py-2 hover:text-primary transition-colors">Browse Courses</Link>
+                {role !== "tutor" && (
+                  <Link href="/tutor-registration" onClick={() => setMobileMenuOpen(false)} className="text-sm font-medium py-2 hover:text-primary transition-colors">Become a Tutor</Link>
+                )}
+                <button
+                  onClick={() => { setIsVideoModalOpen(true); setMobileMenuOpen(false); }}
+                  className="flex items-center gap-2 text-sm font-medium py-2 hover:text-primary transition-colors text-left"
+                >
+                  <Play className="w-4 h-4" /> What's EdKonnect
+                </button>
+                {isAuthenticated && (
+                  <>
+                    <Link href={getDashboardLink()} onClick={() => setMobileMenuOpen(false)} className="flex items-center gap-2 text-sm font-medium py-2 hover:text-primary transition-colors">
+                      <LayoutDashboard className="w-4 h-4" /> Dashboard
+                    </Link>
+                    <Link href={role === ('coordinator' as typeof role) ? '/coordinator/messages' : '/messages'} onClick={() => setMobileMenuOpen(false)} className="flex items-center gap-2 text-sm font-medium py-2 hover:text-primary transition-colors">
+                      <span className="relative">
+                        <MessageSquare className="w-4 h-4" />
+                        {unreadCount > 0 && (
+                          <span className="absolute -top-1.5 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white">
+                            {unreadCount > 9 ? "9+" : unreadCount}
+                          </span>
+                        )}
+                      </span>
+                      Messages
+                    </Link>
+                  </>
+                )}
+              </>
+            )}
+            {!isAuthenticated && !loading && (
+              <a href={LOGIN_PATH} className="text-sm font-medium py-2 hover:text-primary transition-colors">Sign In</a>
+            )}
+          </div>
+        )}
       </div>
       <VideoModal open={isVideoModalOpen} onOpenChange={setIsVideoModalOpen} />
     </div>

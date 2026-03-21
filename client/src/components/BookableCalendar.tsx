@@ -95,7 +95,8 @@ export function BookableCalendar({
 
   // Determine timezones
   const tutorTimezone = tutorProfile?.timezone || detectUserTimezone();
-  const parentTimezone = parentProfile?.timezone || detectUserTimezone();
+  // user.timezone is kept in sync by Settings (refreshProfile on save), so prefer it over the cached parentProfile query
+  const parentTimezone = user?.timezone || parentProfile?.timezone || detectUserTimezone();
 
   // Get friendly timezone names
   const parentTimezoneName = useMemo(() => {
@@ -108,25 +109,20 @@ export function BookableCalendar({
     return found ? found.label : tutorTimezone;
   }, [tutorTimezone]);
 
-  // Get timezone abbreviation for parent
+  // Get timezone abbreviation for parent e.g. "EST", "IST"
   const parentTimezoneAbbr = useMemo(() => {
-    try {
-      return new Date().toLocaleTimeString('en-US', {
-        timeZone: parentTimezone,
-        timeZoneName: 'short'
-      }).split(' ').pop() || '';
-    } catch {
-      return '';
+    const tz = COMMON_TIMEZONES.find(t => t.value === parentTimezone);
+    if (tz) {
+      const match = tz.label.match(/\(([^)]+)\)$/);
+      return match ? match[1] : tz.label;
     }
+    return '';
   }, [parentTimezone]);
 
   // Generate time slots from 8 AM to 8 PM based on actual availability
   const generateTimeSlots = (): TimeSlot[] => {
     if (!selectedDate) return [];
 
-    console.log('[BookableCalendar] Generating slots for:', selectedDate);
-    console.log('[BookableCalendar] Parent timezone:', parentTimezone);
-    console.log('[BookableCalendar] Tutor timezone:', tutorTimezone);
 
     // Set to midnight in parent's local time for the selected date
     const selectedDayStart = new Date(selectedDate);
@@ -134,8 +130,6 @@ export function BookableCalendar({
 
     const selectedDayEnd = new Date(selectedDate);
     selectedDayEnd.setHours(23, 59, 59, 999);
-
-    console.log('[BookableCalendar] Day boundaries:', selectedDayStart, 'to', selectedDayEnd);
 
     const slotsMap = new Map<string, TimeSlot>();
 
@@ -156,8 +150,6 @@ export function BookableCalendar({
       const dayAvailability = tutorAvailability.filter(
         (slot: any) => slot.dayOfWeek === tutorDayOfWeek && slot.isActive
       );
-
-      console.log(`[BookableCalendar] Day offset ${dayOffset}: tutorDayOfWeek=${tutorDayOfWeek}, availability slots:`, dayAvailability);
 
       if (dayAvailability.length === 0) {
         continue;
@@ -186,12 +178,15 @@ export function BookableCalendar({
             continue;
           }
 
-          // Create the exact datetime in tutor's timezone
-          const tutorSlotDate = new Date(checkDateInTutorTZ);
-          tutorSlotDate.setHours(tutorHour, tutorMinute, 0, 0);
-
-          // Convert to UTC timestamp
-          const slotTimestampUTC = convertToUTC(tutorSlotDate, tutorTimezone);
+          // Convert slot time to UTC using tutor's timezone directly
+          const slotTimestampUTC = createTimestamp(
+            checkDateInTutorTZ.getFullYear(),
+            checkDateInTutorTZ.getMonth(),
+            checkDateInTutorTZ.getDate(),
+            tutorHour,
+            tutorMinute,
+            tutorTimezone
+          );
 
           // Convert to parent's timezone to see when this slot appears for the parent
           const slotInParentTZ = convertFromUTC(slotTimestampUTC, parentTimezone);
@@ -204,16 +199,6 @@ export function BookableCalendar({
           const parentHour = slotInParentTZ.getHours();
           const parentMinute = slotInParentTZ.getMinutes();
           const displayTime = `${parentHour.toString().padStart(2, "0")}:${parentMinute.toString().padStart(2, "0")}`;
-          const tutorTime = `${tutorHour.toString().padStart(2, "0")}:${tutorMinute.toString().padStart(2, "0")}`;
-
-          if (tutorHour === 9 && tutorMinute === 0) {
-            console.log(`[BookableCalendar] Slot conversion: tutor ${tutorTime} → parent ${displayTime}`, {
-              tutorSlotDate: tutorSlotDate.toISOString(),
-              slotTimestampUTC,
-              slotInParentTZ: slotInParentTZ.toISOString(),
-            });
-          }
-
           // Check if this time is blocked by a time block (using UTC timestamp)
           let isBlocked = false;
           for (const block of tutorTimeBlocks) {
@@ -249,6 +234,7 @@ export function BookableCalendar({
           }
 
           // Only add available slots that aren't already in the map
+          const tutorTime = `${tutorHour.toString().padStart(2, "0")}:${tutorMinute.toString().padStart(2, "0")}`;
           if (!hasConflict && !slotsMap.has(displayTime)) {
             slotsMap.set(displayTime, {
               time: tutorTime, // Store tutor's time for reference
@@ -399,14 +385,6 @@ export function BookableCalendar({
         </div>
       )}
 
-      {/* Debug info - remove this later */}
-      <div className="text-xs bg-gray-100 p-2 rounded">
-        <div>Tutor TZ: {tutorTimezone} | Parent TZ: {parentTimezone}</div>
-        <div>Available slots: {timeSlots.length}</div>
-        {timeSlots.length > 0 && (
-          <div>First slot: {timeSlots[0].displayTime} (tutor time: {timeSlots[0].time})</div>
-        )}
-      </div>
 
       {/* Recurring Options - Hide for trial lessons */}
       {!isTrial && (
@@ -508,6 +486,7 @@ export function BookableCalendar({
                 >
                   <Clock className="w-3 h-3 mb-1" />
                   <span className="text-xs sm:text-sm font-medium">{slot.displayTime}</span>
+                  {parentTimezoneAbbr && <span className="text-[10px] opacity-60">{parentTimezoneAbbr}</span>}
                 </Button>
               ))}
             </div>

@@ -1,6 +1,7 @@
 import Navigation from "@/components/Navigation";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
+import { useFormatPrice } from "@/hooks/useFormatPrice";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -14,12 +15,14 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Link, useLocation } from "wouter";
-import { BookOpen, Calendar, MessageSquare, DollarSign, Users, Edit, Clock, FileText, Plus, Filter, Search, X, Globe } from "lucide-react";
+import { BookOpen, Calendar, MessageSquare, DollarSign, Users, Edit, Clock, FileText, Plus, Filter, Search, X, Sparkles, Globe, ClipboardPaste, CheckCircle, HelpCircle } from "lucide-react";
 import { AvailabilityManager } from "@/components/AvailabilityManager";
 import { TimeBlockManager } from "@/components/TimeBlockManager";
 import { VideoUploadManager } from "@/components/VideoUploadManager";
+import { ZoomMeetingSetup } from "@/components/ZoomMeetingSetup";
 import { TutorSessionsManager } from "@/components/TutorSessionsManager";
-import { useEffect, useMemo, useState } from "react";
+import { ReferralCouponPopup } from "@/components/ReferralCouponPopup";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { LOGIN_PATH } from "@/const";
 import { toast } from "sonner";
 import { formatSessionTime, COMMON_TIMEZONES } from "@/../../shared/timezone-utils";
@@ -27,6 +30,7 @@ import { formatSessionTime, COMMON_TIMEZONES } from "@/../../shared/timezone-uti
 export default function TutorDashboard() {
   const { user, isAuthenticated, loading } = useAuth();
   const [, setLocation] = useLocation();
+  const formatPrice = useFormatPrice();
 
   // Get tab from URL query parameter
   const urlParams = new URLSearchParams(window.location.search);
@@ -40,7 +44,7 @@ export default function TutorDashboard() {
     { enabled: isAuthenticated && user?.role === "tutor" }
   );
 
-  const { data: courses, isLoading: coursesLoading } = trpc.course.myCoursesAsTutor.useQuery(
+  const { data: courses, isLoading: coursesLoading, refetch: refetchCourses } = trpc.course.myCoursesAsTutor.useQuery(
     undefined,
     { enabled: isAuthenticated && user?.role === "tutor" }
   );
@@ -71,9 +75,11 @@ export default function TutorDashboard() {
   );
 
   const [sessionNotes, setSessionNotes] = useState<Record<number, string>>({});
+  const [summarizingSessionId, setSummarizingSessionId] = useState<number | null>(null);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [completionDialogOpen, setCompletionDialogOpen] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null);
+  const [selectedSessionJoinUrl, setSelectedSessionJoinUrl] = useState<string | null>(null);
   const [completionType, setCompletionType] = useState<"completed" | "no_show">("completed");
   const [completionNotes, setCompletionNotes] = useState("");
   const [selectedYear, setSelectedYear] = useState<string>("all");
@@ -83,6 +89,40 @@ export default function TutorDashboard() {
   const [fetchingTranscripts, setFetchingTranscripts] = useState<Record<number, boolean>>({});
   type PreferenceState = { preferred: boolean; hourlyRate: string; approvalStatus?: string };
   const [preferenceState, setPreferenceState] = useState<Record<number, PreferenceState>>({});
+
+  // Transcript processing state
+  const [transcriptText, setTranscriptText] = useState<Record<number, string>>({});
+  const [processingTranscript, setProcessingTranscript] = useState<number | null>(null);
+  const [showTranscriptInput, setShowTranscriptInput] = useState<Record<number, boolean>>({});
+  const [processedNotes, setProcessedNotes] = useState<Record<number, any>>({});
+  const [aiProcessedSessions, setAiProcessedSessions] = useState<Set<number>>(new Set());
+
+
+  // Transcript modal state
+  type RubricGrade = { criterion: string; score: number; evidence: string };
+  type TranscriptModalState = {
+    sessionId: number;
+    transcript: string;
+    summary?: string;
+    quizQuestions?: Array<{ id: string; question: string; options: string[]; correctAnswer: number }>;
+    activeTab: "transcript" | "quiz" | "grade";
+    courseTitle: string;
+    studentName: string;
+    courseId?: number;
+    parentId?: number;
+    quizEnabled?: boolean;
+    editable?: boolean;
+    grades?: RubricGrade[];
+    overallScore?: number;
+    overallNarrative?: string;
+    transcriptQuality?: "high" | "medium" | "low";
+    transcriptQualityReason?: string;
+  };
+  const [transcriptModal, setTranscriptModal] = useState<TranscriptModalState | null>(null);
+  const [summarizingInModal, setSummarizingInModal] = useState(false);
+  const summarizingInModalRef = useRef(false);
+  const [generatingQuiz, setGeneratingQuiz] = useState(false);
+  const [gradingSession, setGradingSession] = useState(false);
 
   const savePreferencesMutation = trpc.tutorCoursePreferences.saveMine.useMutation({
     onSuccess: () => {
@@ -103,17 +143,216 @@ export default function TutorDashboard() {
 
   const fetchTranscriptMutation = trpc.zoom.fetchTranscript.useMutation({
     onSuccess: (data, variables) => {
-      toast.success("Transcript fetched successfully!");
-      setFetchingTranscripts((prev) => ({ ...prev, [variables.sessionId || 0]: false }));
+      const sessionId = variables.sessionId || 0;
+      setFetchingTranscripts((prev) => ({ ...prev, [sessionId]: false }));
+      if (!data.transcript || data.transcript.trim().length === 0) {
+        toast.warning("No transcript text found for this session. Audio transcript may not be enabled on Zoom.");
+        return;
+      }
+      const session = historySessions?.find((s) => s.id === sessionId);
+      const studentName = [session?.studentFirstName, session?.studentLastName]
+        .filter(Boolean).join(" ") || "Student";
+      setTranscriptModal({
+        sessionId,
+        transcript: data.transcript,
+        activeTab: "transcript",
+        courseTitle: (session as any)?.courseTitle || (session as any)?.courseSubject || "Course",
+        studentName,
+        courseId: session?.courseId ?? undefined,
+        parentId: session?.parentId ?? undefined,
+        quizEnabled: ((session as any)?.courseQuizEnabled ?? false) && !((session as any)?.hasQuiz),
+      });
+      toast.success("Transcript loaded. Review it in the popup.");
     },
     onError: (error, variables) => {
+      const sessionId = variables.sessionId || 0;
       const message = error.message || "Failed to fetch transcript";
-      if (message.includes("No transcript available") || message.includes("not found")) {
-        toast.warning("Transcript is still processing. Please try again in a few minutes.");
+      if (message.includes("No transcript found") || message.includes("No transcript available") || message.includes("not found")) {
+        toast.warning("No transcript available for this session. Make sure cloud recording and audio transcript are enabled in Zoom.");
       } else {
         toast.error(message);
       }
-      setFetchingTranscripts((prev) => ({ ...prev, [variables.sessionId || 0]: false }));
+      setFetchingTranscripts((prev) => ({ ...prev, [sessionId]: false }));
+    },
+  });
+
+  const summarizeMutation = trpc.ai.summarizeText.useMutation({
+    onSuccess: (data) => {
+      if (summarizingSessionId !== null) {
+        // Regular in-page summarize (not from modal)
+        setSessionNotes((prev) => ({
+          ...prev,
+          [summarizingSessionId]: data.summary,
+        }));
+        setSummarizingSessionId(null);
+        toast.success("Notes summarized successfully!");
+      } else if (summarizingInModalRef.current) {
+        // Modal summarize — store in modal state only
+        summarizingInModalRef.current = false;
+        setSummarizingInModal(false);
+        setTranscriptModal((prev) => prev ? { ...prev, summary: data.summary } : prev);
+        toast.success("Summary generated!");
+      }
+    },
+    onError: (error) => {
+      setSummarizingSessionId(null);
+      summarizingInModalRef.current = false;
+      setSummarizingInModal(false);
+      toast.error("Failed to summarize: " + error.message);
+    },
+  });
+
+  const generateQuizMutation = trpc.ai.generateQuiz.useMutation({
+    onSuccess: (data) => {
+      setTranscriptModal((prev) => prev ? { ...prev, quizQuestions: data.questions } : prev);
+      setGeneratingQuiz(false);
+      toast.success("Quiz generated! Review the questions below.");
+    },
+    onError: (error) => {
+      setGeneratingQuiz(false);
+      toast.error("Failed to generate quiz: " + error.message);
+    },
+  });
+
+  const gradeSessionMutation = trpc.ai.gradeSession.useMutation({
+    onSuccess: (data) => {
+      setTranscriptModal((prev) => prev ? {
+        ...prev,
+        grades: data.grades,
+        overallScore: data.overallScore,
+        overallNarrative: data.overallNarrative,
+        transcriptQuality: data.transcriptQuality as "high" | "medium" | "low",
+        transcriptQualityReason: data.transcriptQualityReason,
+        activeTab: "grade",
+      } : prev);
+      setGradingSession(false);
+      toast.success("Session graded successfully!");
+    },
+    onError: (error) => {
+      setGradingSession(false);
+      toast.error("Failed to grade session: " + error.message);
+    },
+  });
+
+  const approveQuizMutation = trpc.quiz.create.useMutation({
+    onSuccess: () => {
+      setTranscriptModal(null);
+      toast.success("Quiz approved and sent to parent!");
+      refetchHistory();
+    },
+    onError: (error) => {
+      toast.error("Failed to save quiz: " + error.message);
+    },
+  });
+
+  const toggleCourseQuizMutation = trpc.quiz.toggleCourseQuiz.useMutation({
+    onSuccess: (_, variables) => {
+      toast.success(`Quiz generation ${variables.enabled ? "enabled" : "disabled"} for this course.`);
+      refetchCourses();
+    },
+    onError: (error) => {
+      toast.error("Failed to update course: " + error.message);
+    },
+  });
+
+  const handleSummarize = (sessionId: number, text: string) => {
+    if (!text || text.trim().length < 10) {
+      toast.error("Please add more content before summarizing");
+      return;
+    }
+    setSummarizingSessionId(sessionId);
+    summarizeMutation.mutate({
+      text,
+      maxLength: 150
+    });
+  };
+
+  // Transcript processing mutations
+  const processTranscriptMutation = trpc.ai.processTranscript.useMutation({
+    onSuccess: (data, variables) => {
+      setProcessedNotes((prev) => ({
+        ...prev,
+        [variables.sessionId]: data,
+      }));
+      setProcessingTranscript(null);
+      toast.success("Transcript processed! Review and save the generated notes.");
+    },
+    onError: (error) => {
+      setProcessingTranscript(null);
+      toast.error("Failed to process transcript: " + error.message);
+    },
+  });
+
+  const handleProcessTranscript = (sessionId: number, studentName: string, courseName: string) => {
+    const transcript = transcriptText[sessionId];
+    if (!transcript || transcript.trim().length < 50) {
+      toast.error("Please enter a valid transcript (at least 50 characters)");
+      return;
+    }
+
+    setProcessingTranscript(sessionId);
+    processTranscriptMutation.mutate({
+      transcript,
+      sessionId,
+      studentName,
+      courseName,
+    });
+  };
+
+  const saveProcessedNotesMutation = trpc.sessionNotes.createFromTranscript.useMutation({
+    onSuccess: (data, variables) => {
+      toast.success("Session notes saved successfully!");
+
+      // Update the manual session notes field with a formatted version of the AI-generated content
+      const processedData = processedNotes[variables.sessionId];
+      if (processedData) {
+        const formattedNotes = [
+          `📝 Progress Summary:\n${processedData.progressSummary}`,
+          processedData.topicsCovered && processedData.topicsCovered.length > 0
+            ? `\n\n📌 Topics Covered:\n${processedData.topicsCovered.map((topic: string) => `• ${topic}`).join('\n')}`
+            : '',
+          processedData.challenges ? `\n\n⚠️ Challenges:\n${processedData.challenges}` : '',
+          processedData.homework ? `\n\n📚 Homework:\n${processedData.homework}` : '',
+          processedData.nextSteps ? `\n\n💡 Next Steps:\n${processedData.nextSteps}` : '',
+        ].filter(Boolean).join('');
+
+        // Update the feedbackFromTutor field so it appears in manual notes
+        updateSessionMutation.mutate({
+          id: variables.sessionId,
+          feedbackFromTutor: formattedNotes
+        });
+
+        // Also update the local session notes state
+        setSessionNotes((prev) => ({
+          ...prev,
+          [variables.sessionId]: formattedNotes,
+        }));
+      }
+
+      // Mark this session as AI-processed to hide Summarize button
+      setAiProcessedSessions((prev) => new Set(prev).add(variables.sessionId));
+
+      refetchHistory();
+
+      // Clear processed notes and transcript for this session
+      setProcessedNotes((prev) => {
+        const updated = { ...prev };
+        delete updated[variables.sessionId];
+        return updated;
+      });
+      setTranscriptText((prev) => {
+        const updated = { ...prev };
+        delete updated[variables.sessionId];
+        return updated;
+      });
+      setShowTranscriptInput((prev) => {
+        const updated = { ...prev };
+        delete updated[variables.sessionId];
+        return updated;
+      });
+    },
+    onError: (error) => {
+      toast.error("Failed to save notes: " + error.message);
     },
   });
 
@@ -257,8 +496,9 @@ export default function TutorDashboard() {
     }
   };
 
-  const handleOpenCompletionDialog = (sessionId: number, existingNotes?: string | null) => {
+  const handleOpenCompletionDialog = (sessionId: number, existingNotes?: string | null, joinUrl?: string | null) => {
     setSelectedSessionId(sessionId);
+    setSelectedSessionJoinUrl(joinUrl || null);
     setCompletionNotes(existingNotes || "");
     setCompletionType("completed");
     setCompletionDialogOpen(true);
@@ -267,16 +507,29 @@ export default function TutorDashboard() {
   const handleCompleteSession = () => {
     if (!selectedSessionId) return;
 
+    const sessionId = selectedSessionId;
+    const joinUrl = selectedSessionJoinUrl;
+
     updateSessionMutation.mutate({
-      id: selectedSessionId,
+      id: sessionId,
       status: completionType as "completed" | "no_show",
       feedbackFromTutor: completionNotes || undefined,
     }, {
       onSuccess: () => {
         setCompletionDialogOpen(false);
         setSelectedSessionId(null);
+        setSelectedSessionJoinUrl(null);
         setCompletionNotes("");
         setCompletionType("completed");
+
+        // Auto-fetch transcript after session is marked complete
+        if (completionType === "completed" && joinUrl) {
+          setSessionNotes((prev) => ({
+            ...prev,
+            [sessionId]: "Transcript being fetched to process...",
+          }));
+          handleFetchTranscript(sessionId, joinUrl);
+        }
       }
     });
   };
@@ -341,6 +594,40 @@ export default function TutorDashboard() {
       meetingId,
       sessionId,
     });
+  };
+
+  const handlePasteTranscript = (sessionId: number) => {
+    const session = historySessions?.find((s) => s.id === sessionId);
+    const studentName = [session?.studentFirstName, session?.studentLastName]
+      .filter(Boolean).join(" ") || "Student";
+    setTranscriptModal({
+      sessionId,
+      transcript: "",
+      activeTab: "transcript",
+      courseTitle: (session as any)?.courseTitle || (session as any)?.courseSubject || "Course",
+      studentName,
+      courseId: session?.courseId ?? undefined,
+      parentId: session?.parentId ?? undefined,
+      quizEnabled: !!(session as any)?.courseQuizEnabled && !(session as any)?.hasQuiz,
+      editable: true,
+    });
+  };
+
+  const handleModalSummarize = () => {
+    if (!transcriptModal?.transcript) return;
+    summarizingInModalRef.current = true;
+    setSummarizingInModal(true);
+    summarizeMutation.mutate({ text: transcriptModal.transcript, maxLength: 200 });
+  };
+
+  const handleUseThisSummary = () => {
+    if (!transcriptModal?.summary) return;
+    const { sessionId, summary } = transcriptModal;
+    setSessionNotes((prev) => ({
+      ...prev,
+      [sessionId]: summary,
+    }));
+    toast.success("Summary saved to session notes. Don't forget to save!");
   };
 
   const hiddenStorageKey = user ? `tutor_hidden_sessions_${user.id}` : "tutor_hidden_sessions";
@@ -525,7 +812,7 @@ export default function TutorDashboard() {
                       <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center">
                         <DollarSign className="w-5 h-5 text-primary" />
                       </div>
-                      <span className="text-3xl font-bold">${earnings?.completed.toFixed(0) || 0}</span>
+                      <span className="text-3xl font-bold">{formatPrice(earnings?.completed || 0)}</span>
                     </div>
                   </CardContent>
                 </Card>
@@ -549,29 +836,15 @@ export default function TutorDashboard() {
               <Tabs defaultValue={tabFromUrl} className="space-y-6">
                 <div className="overflow-x-auto">
               <TabsList className="inline-flex min-w-max gap-2 sm:w-full sm:flex-wrap sm:justify-start">
-                <TabsTrigger className="whitespace-nowrap" value="profile">Profile</TabsTrigger>
                 <TabsTrigger className="whitespace-nowrap" value="courses">Courses</TabsTrigger>
                 <TabsTrigger className="whitespace-nowrap" value="course-preferences">Course Preferences</TabsTrigger>
                 <TabsTrigger className="whitespace-nowrap" value="students">Students</TabsTrigger>
                 <TabsTrigger className="whitespace-nowrap" value="sessions">Sessions</TabsTrigger>
                 <TabsTrigger className="whitespace-nowrap" value="history">History</TabsTrigger>
-                <TabsTrigger className="whitespace-nowrap" value="availability">Availability</TabsTrigger>
               </TabsList>
                 </div>
 
                 <div className="relative min-h-[540px] pt-6">
-                {/* Profile Tab */}
-                <TabsContent value="profile" forceMount className={tabContentClass}>
-                  <h2 className="text-2xl font-bold mb-6">Profile Settings</h2>
-
-                  {/* Zoom Meeting Setup */}
-                  <ZoomMeetingSetup tutorProfile={tutorProfile} />
-
-                  <VideoUploadManager
-                    currentVideoUrl={(tutorProfile as any)?.introVideoUrl}
-                  />
-                </TabsContent>
-
                 {/* Courses Tab */}
                 <TabsContent value="courses" forceMount className={tabContentClass}>
                   <div className="flex items-center justify-between">
@@ -606,7 +879,7 @@ export default function TutorDashboard() {
                             <div className="grid grid-cols-2 gap-4 text-sm">
                               <div>
                                 <p className="text-muted-foreground">Price</p>
-                                <p className="font-semibold text-lg">${parseFloat(course.price)}</p>
+                                <p className="font-semibold text-lg">{formatPrice(course.price)}</p>
                               </div>
                               {course.duration && (
                                 <div>
@@ -614,6 +887,20 @@ export default function TutorDashboard() {
                                   <p className="font-medium">{course.duration} min</p>
                                 </div>
                               )}
+                            </div>
+
+                            <div className="flex items-center justify-between p-2 rounded-md border bg-muted/30">
+                              <div>
+                                <p className="text-sm font-medium">Quiz Generation</p>
+                                <p className="text-xs text-muted-foreground">Allow quiz creation from transcripts</p>
+                              </div>
+                              <Checkbox
+                                checked={course.quizEnabled ?? false}
+                                onCheckedChange={(checked) =>
+                                  toggleCourseQuizMutation.mutate({ courseId: course.id, enabled: !!checked })
+                                }
+                                disabled={toggleCourseQuizMutation.isPending}
+                              />
                             </div>
 
                             <Button asChild variant="outline" size="sm" className="w-full">
@@ -1084,7 +1371,7 @@ export default function TutorDashboard() {
                                 {canComplete(session) && (
                                   <Button
                                     size="sm"
-                                    onClick={() => handleOpenCompletionDialog(session.id, session.feedbackFromTutor)}
+                                    onClick={() => handleOpenCompletionDialog(session.id, session.feedbackFromTutor, session.joinUrl)}
                                     disabled={updateSessionMutation.isPending}
                                   >
                                     Complete Session
@@ -1092,13 +1379,15 @@ export default function TutorDashboard() {
                                 )}
 
                                 {session.status === "completed" && (
-                                  <div className="mt-4 p-3 sm:p-4 rounded-lg border-l-4 border-blue-500 bg-blue-50 dark:bg-blue-950/20">
-                                    <div className="flex items-start gap-3">
-                                      <FileText className="w-5 h-5 text-blue-600 dark:text-blue-400 mt-0.5 flex-shrink-0" />
-                                      <div className="flex-1 space-y-2">
-                                        <Label className="text-sm font-semibold text-blue-900 dark:text-blue-100">
-                                          Session Notes
-                                        </Label>
+                                  <>
+                                    {/* Session Notes Section */}
+                                    <div className="mt-4 p-3 sm:p-4 rounded-lg border-l-4 border-blue-500 bg-blue-50 dark:bg-blue-950/20">
+                                      <div className="flex items-start gap-3">
+                                        <FileText className="w-5 h-5 text-blue-600 dark:text-blue-400 mt-0.5 flex-shrink-0" />
+                                        <div className="flex-1 space-y-2">
+                                          <Label className="text-sm font-semibold text-blue-900 dark:text-blue-100">
+                                            Session Notes
+                                          </Label>
                                         <Textarea
                                           value={noteValue}
                                           onChange={(e) =>
@@ -1110,7 +1399,7 @@ export default function TutorDashboard() {
                                           placeholder="What did you cover today? How did the student perform? Any homework assigned?"
                                           className="bg-white dark:bg-gray-900 min-h-[100px] text-sm"
                                         />
-                                        <div className="flex gap-2">
+                                        <div className="flex flex-wrap gap-2">
                                           <Button size="sm" onClick={saveNotes} disabled={updateSessionMutation.isPending}>
                                             <FileText className="w-3 h-3 mr-1" />
                                             Save Notes
@@ -1124,10 +1413,40 @@ export default function TutorDashboard() {
                                             <FileText className="w-3 h-3 mr-1" />
                                             {fetchingTranscripts[session.id] ? "Fetching..." : "Fetch Transcript"}
                                           </Button>
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => handlePasteTranscript(session.id)}
+                                          >
+                                            <ClipboardPaste className="w-3 h-3 mr-1" />
+                                            Paste Transcript
+                                          </Button>
+                                          {/* Only show Summarize button if session hasn't been AI-processed */}
+                                          {!aiProcessedSessions.has(session.id) && (
+                                            <Button
+                                              size="sm"
+                                              variant="outline"
+                                              onClick={() => handleSummarize(session.id, noteValue)}
+                                              disabled={summarizingSessionId === session.id || !noteValue || noteValue.trim().length < 10}
+                                            >
+                                              {summarizingSessionId === session.id ? (
+                                                <>
+                                                  <span className="animate-spin mr-2">⚡</span>
+                                                  Summarizing...
+                                                </>
+                                              ) : (
+                                                <>
+                                                  <Sparkles className="w-3 h-3 mr-1" />
+                                                  Summarize
+                                                </>
+                                              )}
+                                            </Button>
+                                          )}
                                         </div>
                                       </div>
                                     </div>
                                   </div>
+                                  </>
                                 )}
 
                                 {session.status === "no_show" && (
@@ -1152,19 +1471,60 @@ export default function TutorDashboard() {
                                           placeholder="Add notes for the student (e.g., homework, materials to review)"
                                           className="bg-white dark:bg-gray-900 min-h-[100px] text-sm"
                                         />
-                                        <Button
-                                          size="sm"
-                                          onClick={saveNotes}
-                                          disabled={
-                                            updateSessionMutation.isPending ||
-                                            noteValue === (session.feedbackFromTutor ?? "")
-                                          }
-                                        >
-                                          <FileText className="w-3 h-3 mr-1" />
-                                          Save Notes
-                                        </Button>
+                                        <div className="flex gap-2">
+                                          <Button
+                                            size="sm"
+                                            onClick={saveNotes}
+                                            disabled={
+                                              updateSessionMutation.isPending ||
+                                              noteValue === (session.feedbackFromTutor ?? "")
+                                            }
+                                          >
+                                            <FileText className="w-3 h-3 mr-1" />
+                                            Save Notes
+                                          </Button>
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => handleSummarize(session.id, noteValue)}
+                                            disabled={summarizingSessionId === session.id || !noteValue || noteValue.trim().length < 10}
+                                          >
+                                            {summarizingSessionId === session.id ? (
+                                              <>
+                                                <span className="animate-spin mr-2">⚡</span>
+                                                Summarizing...
+                                              </>
+                                            ) : (
+                                              <>
+                                                <Sparkles className="w-3 h-3 mr-1" />
+                                                Summarize
+                                              </>
+                                            )}
+                                          </Button>
+                                        </div>
                                       </div>
                                     </div>
+                                  </div>
+                                )}
+
+                                {(session as any).hasQuiz && (
+                                  <div className="mt-2">
+                                    {(session as any).quizStatus === "completed" ? (
+                                      <div className={`flex items-center gap-1.5 text-sm ${(session as any).quizScore == null || (session as any).quizScore >= 70 ? "text-green-600 dark:text-green-400" : (session as any).quizScore >= 40 ? "text-orange-500 dark:text-orange-400" : "text-red-500 dark:text-red-400"}`}>
+                                        <CheckCircle className="w-4 h-4" />
+                                        <span>Quiz completed</span>
+                                        {(session as any).quizScore != null && (
+                                          <span className="font-semibold">
+                                            · {(session as any).quizScore}% ({(session as any).quizCorrectCount}/{(session as any).quizTotalCount})
+                                          </span>
+                                        )}
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-center gap-1.5 text-sm text-amber-600 dark:text-amber-400">
+                                        <HelpCircle className="w-4 h-4" />
+                                        <span>Quiz assigned — pending</span>
+                                      </div>
+                                    )}
                                   </div>
                                 )}
 
@@ -1208,21 +1568,6 @@ export default function TutorDashboard() {
                   )}
                 </TabsContent>
 
-                {/* Availability Tab */}
-                <TabsContent value="availability" forceMount className={tabContentClass}>
-                  <div className="flex items-center gap-2 mb-6">
-                    <Clock className="h-6 w-6" />
-                    <h2 className="text-2xl font-bold">Manage Availability</h2>
-                  </div>
-                  <p className="text-muted-foreground mb-6">
-                    Set your regular weekly schedule and block out time for vacations or appointments.
-                    Parents will only be able to book sessions during your available hours.
-                  </p>
-                  <div className="space-y-6">
-                    <AvailabilityManager />
-                    <TimeBlockManager />
-                  </div>
-                </TabsContent>
                 </div>
               </Tabs>
             </>
@@ -1303,157 +1648,311 @@ export default function TutorDashboard() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ReferralCouponPopup />
+
+      {transcriptModal && (
+        <Dialog open={true} onOpenChange={() => setTranscriptModal(null)}>
+          <DialogContent className="w-full max-w-2xl max-h-[92vh] sm:max-h-[90vh] flex flex-col overflow-hidden p-0 mx-2 sm:mx-auto">
+            <div className="flex flex-col min-h-0 flex-1 overflow-hidden px-4 sm:px-6 pt-5 sm:pt-6 pb-0">
+            <DialogHeader className="mb-1">
+              <DialogTitle className="text-lg sm:text-xl leading-tight">Session Transcript</DialogTitle>
+            </DialogHeader>
+            <p className="text-sm text-muted-foreground mt-1 mb-4 leading-snug">
+              {transcriptModal.courseTitle} &bull; {transcriptModal.studentName}
+            </p>
+
+            <Tabs
+              value={transcriptModal.activeTab}
+              onValueChange={(v) =>
+                setTranscriptModal((prev) => prev ? { ...prev, activeTab: v as "transcript" | "quiz" | "grade" } : prev)
+              }
+              className="flex-1 flex flex-col min-h-0"
+            >
+              <TabsList className="w-full shrink-0 h-auto flex-wrap gap-1 sm:flex-nowrap">
+                <TabsTrigger value="transcript" className="flex-1 text-xs sm:text-sm py-1.5 min-w-0">Transcript / Summary</TabsTrigger>
+                {transcriptModal.quizEnabled && (
+                  <TabsTrigger value="quiz" className="flex-1 text-xs sm:text-sm py-1.5 min-w-0">Quiz</TabsTrigger>
+                )}
+                <TabsTrigger value="grade" className="flex-1 text-xs sm:text-sm py-1.5 min-w-0">Grade Session</TabsTrigger>
+              </TabsList>
+
+              {/* Transcript Tab */}
+              <TabsContent value="transcript" className="flex-1 flex flex-col gap-4 min-h-0 mt-4 overflow-y-auto pr-1">
+                {transcriptModal.editable ? (
+                  <Textarea
+                    value={transcriptModal.transcript}
+                    onChange={(e) => setTranscriptModal((prev) => prev ? { ...prev, transcript: e.target.value } : prev)}
+                    placeholder="Paste your transcript here..."
+                    className="flex-1 min-h-[200px] text-sm font-mono resize-none"
+                  />
+                ) : (
+                  <div className="overflow-y-auto rounded-md border bg-muted/30 p-3 text-sm whitespace-pre-wrap max-h-48">
+                    {transcriptModal.transcript || "No transcript content."}
+                  </div>
+                )}
+
+                {!transcriptModal.summary ? (
+                  <Button
+                    onClick={handleModalSummarize}
+                    disabled={summarizingInModal}
+                    variant="outline"
+                    className="self-start shrink-0"
+                  >
+                    <Sparkles className="w-4 h-4 mr-2" />
+                    {summarizingInModal ? "Summarizing..." : "Summarize"}
+                  </Button>
+                ) : (
+                  <div className="space-y-3 shrink-0">
+                    <div>
+                      <Label className="text-xs font-medium text-muted-foreground mb-1 block">Summary</Label>
+                      <div className="overflow-y-auto rounded-md border bg-primary/5 p-3 text-sm max-h-48">
+                        {transcriptModal.summary}
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button onClick={handleUseThisSummary} size="sm">
+                        Save to Notes
+                      </Button>
+                      <Button
+                        onClick={handleModalSummarize}
+                        disabled={summarizingInModal}
+                        variant="outline"
+                        size="sm"
+                      >
+                        {summarizingInModal ? "Regenerating..." : "Regenerate"}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </TabsContent>
+
+              {/* Quiz Tab */}
+              {transcriptModal.quizEnabled && (
+                <TabsContent value="quiz" className="flex-1 flex flex-col gap-4 min-h-0 mt-4 overflow-y-auto">
+                  {!transcriptModal.quizQuestions ? (
+                    <div className="flex flex-col items-center justify-center py-8 gap-3">
+                      <p className="text-sm text-muted-foreground text-center">
+                        Generate an MCQ quiz based on this session's transcript.
+                      </p>
+                      <Button
+                        onClick={() => {
+                          setGeneratingQuiz(true);
+                          generateQuizMutation.mutate({
+                            transcript: transcriptModal.transcript,
+                            sessionId: transcriptModal.sessionId,
+                            courseName: transcriptModal.courseTitle,
+                            studentName: transcriptModal.studentName,
+                          });
+                        }}
+                        disabled={generatingQuiz}
+                      >
+                        <Sparkles className="w-4 h-4 mr-2" />
+                        {generatingQuiz ? "Generating..." : "Generate Quiz"}
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="space-y-5">
+                      {transcriptModal.quizQuestions.map((q, idx) => (
+                        <div key={q.id} className="border rounded-lg p-4 space-y-3">
+                          <div className="flex items-start gap-2">
+                            <span className="text-xs font-bold text-muted-foreground mt-1">{idx + 1}.</span>
+                            <Input
+                              value={q.question}
+                              onChange={(e) => {
+                                const updated = [...transcriptModal.quizQuestions!];
+                                updated[idx] = { ...updated[idx], question: e.target.value };
+                                setTranscriptModal((prev) => prev ? { ...prev, quizQuestions: updated } : prev);
+                              }}
+                              className="text-sm font-medium"
+                            />
+                          </div>
+                          <div className="space-y-2 pl-5">
+                            {q.options.map((opt, optIdx) => (
+                              <div key={optIdx} className="flex items-center gap-2">
+                                <RadioGroup
+                                  value={q.correctAnswer.toString()}
+                                  onValueChange={(val) => {
+                                    const updated = [...transcriptModal.quizQuestions!];
+                                    updated[idx] = { ...updated[idx], correctAnswer: parseInt(val) as 0|1|2|3 };
+                                    setTranscriptModal((prev) => prev ? { ...prev, quizQuestions: updated } : prev);
+                                  }}
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <RadioGroupItem value={optIdx.toString()} id={`q${idx}-opt${optIdx}`} />
+                                  </div>
+                                </RadioGroup>
+                                <Input
+                                  value={opt}
+                                  onChange={(e) => {
+                                    const updated = [...transcriptModal.quizQuestions!];
+                                    const newOptions = [...updated[idx].options] as [string,string,string,string];
+                                    newOptions[optIdx] = e.target.value;
+                                    updated[idx] = { ...updated[idx], options: newOptions };
+                                    setTranscriptModal((prev) => prev ? { ...prev, quizQuestions: updated } : prev);
+                                  }}
+                                  className={`text-sm flex-1 ${q.correctAnswer === optIdx ? "border-green-500 bg-green-50 dark:bg-green-950/20" : ""}`}
+                                />
+                                {q.correctAnswer === optIdx && (
+                                  <span className="text-xs text-green-600 font-medium whitespace-nowrap">Correct</span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+
+                      <div className="flex gap-2 pt-2">
+                        <Button
+                          onClick={() => {
+                            if (!transcriptModal.quizQuestions || !transcriptModal.parentId) return;
+                            approveQuizMutation.mutate({
+                              sessionId: transcriptModal.sessionId,
+                              courseId: transcriptModal.courseId,
+                              parentId: transcriptModal.parentId,
+                              questions: transcriptModal.quizQuestions,
+                            });
+                          }}
+                          disabled={approveQuizMutation.isPending || !transcriptModal.parentId}
+                        >
+                          {approveQuizMutation.isPending ? "Saving..." : "Approve & Assign to Parent"}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={() => {
+                            setGeneratingQuiz(true);
+                            generateQuizMutation.mutate({
+                              transcript: transcriptModal.transcript,
+                              sessionId: transcriptModal.sessionId,
+                              courseName: transcriptModal.courseTitle,
+                              studentName: transcriptModal.studentName,
+                            });
+                          }}
+                          disabled={generatingQuiz}
+                        >
+                          {generatingQuiz ? "Regenerating..." : "Regenerate"}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </TabsContent>
+              )}
+
+              {/* Grade Tab */}
+              <TabsContent value="grade" className="flex-1 flex flex-col gap-4 min-h-0 mt-4 overflow-y-auto">
+                {!transcriptModal.grades ? (
+                  <div className="flex flex-col items-center justify-center py-8 gap-3">
+                    <p className="text-sm text-muted-foreground text-center max-w-sm">
+                      Grade this session using the EdKonnect 4-criteria rubric. AI will analyze the transcript and score teaching quality (1–4 scale).
+                    </p>
+                    <Button
+                      onClick={() => {
+                        setGradingSession(true);
+                        gradeSessionMutation.mutate({
+                          transcript: transcriptModal.transcript,
+                          sessionId: transcriptModal.sessionId,
+                          courseName: transcriptModal.courseTitle,
+                          studentName: transcriptModal.studentName,
+                        });
+                      }}
+                      disabled={gradingSession}
+                    >
+                      <Sparkles className="w-4 h-4 mr-2" />
+                      {gradingSession ? "Grading..." : "Grade Session"}
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {/* Transcript quality warning */}
+                    {transcriptModal.transcriptQuality === "low" && (
+                      <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/20 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                        <span className="shrink-0">⚠️</span>
+                        <span><strong>Grade may be inaccurate</strong> — {transcriptModal.transcriptQualityReason || "transcript had audio gaps"}</span>
+                      </div>
+                    )}
+
+                    {/* Overall score */}
+                    <div className="flex items-center justify-between rounded-xl bg-primary/5 border px-4 py-3">
+                      <div>
+                        <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Overall Score</p>
+                        <p className="text-2xl font-bold">{transcriptModal.overallScore?.toFixed(1)} <span className="text-sm font-normal text-muted-foreground">/ 4.0</span></p>
+                      </div>
+                      <div className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                        (transcriptModal.overallScore ?? 0) >= 3.5 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400" :
+                        (transcriptModal.overallScore ?? 0) >= 2.5 ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" :
+                        (transcriptModal.overallScore ?? 0) >= 1.5 ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" :
+                        "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                      }`}>
+                        {(transcriptModal.overallScore ?? 0) >= 3.5 ? "Exceeds" : (transcriptModal.overallScore ?? 0) >= 2.5 ? "Proficient" : (transcriptModal.overallScore ?? 0) >= 1.5 ? "Developing" : "Needs Support"}
+                      </div>
+                    </div>
+
+                    {/* Per-criterion scores */}
+                    <div className="space-y-3">
+                      {transcriptModal.grades.map((g) => {
+                        const scoreColor = g.score === 4 ? "bg-emerald-500" : g.score === 3 ? "bg-blue-500" : g.score === 2 ? "bg-amber-400" : "bg-red-500";
+                        const scoreLabel = g.score === 4 ? "Exceeds" : g.score === 3 ? "Proficient" : g.score === 2 ? "Developing" : "Support";
+                        return (
+                          <div key={g.criterion} className="rounded-lg border p-3 space-y-2">
+                            <div className="flex items-center justify-between">
+                              <p className="text-xs font-semibold">{g.criterion}</p>
+                              <span className={`text-xs text-white px-2 py-0.5 rounded-full font-medium ${scoreColor}`}>{g.score}/4 · {scoreLabel}</span>
+                            </div>
+                            <div className="w-full bg-muted rounded-full h-1.5">
+                              <div className={`h-1.5 rounded-full ${scoreColor} transition-all`} style={{ width: `${(g.score / 4) * 100}%` }} />
+                            </div>
+                            <p className="text-xs text-muted-foreground italic">"{g.evidence}"</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Narrative */}
+                    {transcriptModal.overallNarrative && (
+                      <div className="rounded-lg border bg-muted/30 p-3">
+                        <p className="text-xs font-medium text-muted-foreground mb-1">AI Summary</p>
+                        <p className="text-sm">{transcriptModal.overallNarrative}</p>
+                      </div>
+                    )}
+
+                    {/* Disclaimer */}
+                    <p className="text-xs text-muted-foreground text-center border-t pt-3">
+                      AI-assisted quality signal based on session transcript. Scores reflect observable teaching behaviors.
+                    </p>
+
+                    {/* Regrade */}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="self-start"
+                      disabled={gradingSession}
+                      onClick={() => {
+                        setGradingSession(true);
+                        gradeSessionMutation.mutate({
+                          transcript: transcriptModal.transcript,
+                          sessionId: transcriptModal.sessionId,
+                          courseName: transcriptModal.courseTitle,
+                          studentName: transcriptModal.studentName,
+                        });
+                      }}
+                    >
+                      {gradingSession ? "Regrading..." : "Regrade"}
+                    </Button>
+                  </div>
+                )}
+              </TabsContent>
+            </Tabs>
+            </div>
+
+            <DialogFooter className="shrink-0 px-4 sm:px-6 py-3 sm:py-4 border-t">
+              <Button variant="outline" onClick={() => setTranscriptModal(null)}>
+                Close
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }
 
-/**
- * Component for managing tutor's Zoom meeting link
- */
-function ZoomMeetingSetup({ tutorProfile }: { tutorProfile: any }) {
-  const [isCreating, setIsCreating] = useState(false);
-  const [showUrls, setShowUrls] = useState(false);
-
-  const createZoomMeeting = trpc.tutorProfile.createZoomMeeting.useMutation({
-    onSuccess: (data) => {
-      toast.success("Zoom meeting created successfully!");
-      setShowUrls(true);
-      // Reload the page to refresh tutor profile data
-      window.location.reload();
-    },
-    onError: (error) => {
-      toast.error(error.message || "Failed to create Zoom meeting");
-      setIsCreating(false);
-    },
-  });
-
-  const handleCreateZoomMeeting = async () => {
-    setIsCreating(true);
-    try {
-      await createZoomMeeting.mutateAsync();
-    } catch (error) {
-      // Error handled by onError callback
-    }
-  };
-
-  const hasZoomMeeting = tutorProfile?.zoomJoinUrl;
-
-  return (
-    <Card className="mb-6">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Globe className="w-5 h-5" />
-          Zoom Meeting Setup
-        </CardTitle>
-        <CardDescription>
-          {hasZoomMeeting
-            ? "Your permanent Zoom meeting room for all tutoring sessions"
-            : "Create your permanent Zoom meeting link to use for all sessions"}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {hasZoomMeeting ? (
-          <>
-            <div className="space-y-3">
-              <div>
-                <Label className="text-sm font-medium">Student Join URL</Label>
-                <div className="flex items-center gap-2 mt-1">
-                  <Input
-                    readOnly
-                    value={tutorProfile.zoomJoinUrl}
-                    className="font-mono text-sm"
-                  />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      navigator.clipboard.writeText(tutorProfile.zoomJoinUrl);
-                      toast.success("Join URL copied to clipboard!");
-                    }}
-                  >
-                    Copy
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Share this link with your students
-                </p>
-              </div>
-
-              <div>
-                <Label className="text-sm font-medium">Your Host URL</Label>
-                <div className="flex items-center gap-2 mt-1">
-                  <Input
-                    readOnly
-                    value={tutorProfile.zoomHostUrl}
-                    className="font-mono text-sm"
-                  />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      navigator.clipboard.writeText(tutorProfile.zoomHostUrl);
-                      toast.success("Host URL copied to clipboard!");
-                    }}
-                  >
-                    Copy
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Use this link to start your meetings
-                </p>
-              </div>
-
-              {tutorProfile.zoomMeetingPassword && (
-                <div>
-                  <Label className="text-sm font-medium">Meeting Password</Label>
-                  <Input
-                    readOnly
-                    value={tutorProfile.zoomMeetingPassword}
-                    className="font-mono text-sm mt-1"
-                  />
-                </div>
-              )}
-
-              <div className="pt-2">
-                <Badge variant="secondary" className="text-xs">
-                  ✅ Permanent Meeting Room - Use for all sessions
-                </Badge>
-              </div>
-            </div>
-
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleCreateZoomMeeting}
-              disabled={isCreating}
-            >
-              {isCreating ? "Creating..." : "Recreate Zoom Meeting"}
-            </Button>
-          </>
-        ) : (
-          <div className="space-y-4">
-            <div className="bg-muted/50 p-4 rounded-lg space-y-2">
-              <p className="text-sm">
-                <strong>Why create a permanent Zoom link?</strong>
-              </p>
-              <ul className="text-sm text-muted-foreground space-y-1 list-disc list-inside">
-                <li>One consistent link for all your tutoring sessions</li>
-                <li>Students can easily save and reuse the same link</li>
-                <li>Automatic cloud recording for session transcripts</li>
-                <li>Students can join before you arrive</li>
-              </ul>
-            </div>
-
-            <Button
-              onClick={handleCreateZoomMeeting}
-              disabled={isCreating}
-              className="w-full"
-            >
-              {isCreating ? "Creating Zoom Meeting..." : "Create My Zoom Meeting Room"}
-            </Button>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}

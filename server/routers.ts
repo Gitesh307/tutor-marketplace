@@ -1,16 +1,21 @@
-import { clearAuthCookies } from "./_core/services/authService";
+import { clearAuthCookies, verifyPassword, hashPassword } from "./_core/services/authService";
+import { ENV } from "./_core/env";
 import { systemRouter } from "./_core/systemRouter";
 import { notifyOwner } from "./_core/notification";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { z } from "zod";
 import * as db from "./db";
 import { TRPCError } from "@trpc/server";
-import { sendWelcomeEmail, sendBookingConfirmation, sendEnrollmentConfirmation, sendTutorEnrollmentNotification, sendNoShowNotification, formatEmailDate, formatEmailTime, formatEmailPrice } from "./email-helpers";
+import { searchFaq, logUnansweredQuestion, logQuery } from "./faq-search";
+import { checkChatbotRateLimit } from "./chatbot-rate-limiter";
+import { sendWelcomeEmail, sendBookingConfirmation, sendEnrollmentConfirmation, sendTutorEnrollmentNotification, sendNoShowNotification, formatEmailDate, formatEmailTime, formatEmailPrice, sendTutorApplicationReceivedEmail, sendReferralInviteEmail, sendCouponRewardEmail } from "./email-helpers";
 import { generateBookingToken, isValidBookingToken } from "./booking-management";
 import { sendCancellationConfirmationEmail } from "./cancellation-email";
 import { generateCurriculumPDF } from "./pdf-generator";
 import { sendSessionNotesEmail } from "./session-notes-email";
+import { emailService } from "./email-service";
 import { storagePut } from "./storage";
+import { uploadProfileImageToS3, deleteProfileImageFromS3 } from "./s3Storage";
 import crypto from "crypto";
 import { and, eq } from "drizzle-orm";
 import { subscriptions as subscriptionsTable, tutorProfiles, users } from "../drizzle/schema";
@@ -46,6 +51,93 @@ const coordinatorProcedure = protectedProcedure.use(({ ctx, next }) => {
   }
   return next({ ctx });
 });
+
+const SIBLING_DISCOUNT_PERCENT = 5;
+
+/**
+ * Returns true if the given student (by first+last name) qualifies for a sibling discount.
+ * Conditions:
+ *  1. The parent has at least one non-cancelled enrollment for ANY student.
+ *  2. This specific student (first+last name) has ZERO previous non-cancelled enrollments.
+ */
+async function checkSiblingDiscount(
+  parentId: number,
+  studentFirstName: string,
+  studentLastName: string
+): Promise<boolean> {
+  const normalize = (v: string | null | undefined) => (v || "").trim().toLowerCase();
+  const targetFirst = normalize(studentFirstName);
+  const targetLast = normalize(studentLastName);
+
+  const existing = await db.getSubscriptionsByParentId(parentId);
+  const active = existing.filter((s: any) => s.subscription?.status !== "cancelled");
+
+  // Must have at least one existing enrollment (for any child)
+  if (active.length === 0) return false;
+
+  // This student must have zero previous enrollments
+  const studentHasEnrollment = active.some((s: any) => {
+    const sub = s.subscription;
+    return (
+      normalize(sub?.studentFirstName) === targetFirst &&
+      normalize(sub?.studentLastName) === targetLast
+    );
+  });
+
+  return !studentHasEnrollment;
+}
+
+/**
+ * Called after a parent's FIRST enrollment is confirmed.
+ * Issues 25% coupon to both the referred user and their referrer, sends reward emails.
+ * Safe to call even if the user wasn't referred — it simply does nothing in that case.
+ */
+/**
+ * Called after the referred user's FIRST enrollment is confirmed.
+ * Only rewards the REFERRER — the referred user already got their coupon at email verification.
+ */
+async function triggerReferralReward(parentId: number): Promise<void> {
+  try {
+    // Must be first enrollment
+    const isFirstEnrollment = !(await db.hasUserAlreadyEnrolled(parentId));
+    if (!isFirstEnrollment) return;
+
+    const parentUser = await db.getUserById(parentId);
+    if (!parentUser || !parentUser.referredBy) return;
+
+    // Find the referral record
+    const referral = await db.getReferralByReferredUserId(parentId);
+    if (!referral || referral.status === "rewarded") return;
+
+    // Find the referrer
+    const referrerUser = await db.getUserByReferralCode(parentUser.referredBy);
+    if (!referrerUser) return;
+
+    // Create coupon for the referrer (amounts are 0; applied at their next enrollment)
+    const referrerCoupon = await db.createCoupon({
+      userId: referrerUser.id,
+      sourceReferralId: referral.id,
+    });
+
+    // Mark referral as fully rewarded
+    await db.updateReferralRewarded(referral.id);
+
+    // Email the referrer their reward
+    if (referrerCoupon && referrerUser.email) {
+      const parentName = `${parentUser.firstName} ${parentUser.lastName}`.trim();
+      const referrerName = `${referrerUser.firstName} ${referrerUser.lastName}`.trim();
+      await sendCouponRewardEmail({
+        userEmail: referrerUser.email,
+        userName: referrerName,
+        couponCode: referrerCoupon.code,
+        reason: "referrer",
+        friendName: parentName,
+      }).catch(err => console.error("[Referral] Failed to send reward email to referrer:", err));
+    }
+  } catch (err) {
+    console.error("[Referral] triggerReferralReward failed:", err);
+  }
+}
 
 /**
  * Get tutor's permanent Zoom meeting URL
@@ -114,6 +206,55 @@ export const appRouter = router({
 
         return { success: true };
       }),
+
+    updateProfile: protectedProcedure
+      .input(z.object({
+        firstName: z.string().min(1).optional(),
+        lastName: z.string().min(1).optional(),
+        email: z.string().email().optional(),
+        phoneNumber: z.string().optional(),
+        timezone: z.string().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { timezone, ...profileUpdates } = input;
+        const success = await db.updateUserProfile(ctx.user.id, profileUpdates);
+        if (!success) {
+          throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to update profile' });
+        }
+        if (timezone) {
+          // Update users.timezone (drives INR/USD pricing)
+          await db.updateUserTimezone(ctx.user.id, timezone);
+          // Also sync to profile tables so session/scheduling components pick it up
+          const role = ctx.user.role;
+          if (role === "tutor") {
+            await db.updateTutorProfile(ctx.user.id, { timezone }).catch(() => {});
+          } else if (role === "parent") {
+            await db.updateParentProfile(ctx.user.id, { timezone }).catch(() => {});
+          }
+        }
+        return { success: true };
+      }),
+
+    changePassword: protectedProcedure
+      .input(z.object({
+        currentPassword: z.string().min(1),
+        newPassword: z.string().min(8),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const user = await db.getUserById(ctx.user.id);
+        if (!user || !user.passwordHash) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
+        }
+        const valid = await verifyPassword(input.currentPassword, user.passwordHash);
+        if (!valid) {
+          throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Current password is incorrect' });
+        }
+        const newHash = await hashPassword(input.newPassword);
+        const database = await db.getDb();
+        if (!database) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+        await database.update(users).set({ passwordHash: newHash }).where(eq(users.id, ctx.user.id));
+        return { success: true };
+      }),
   }),
 
   // User Management
@@ -146,7 +287,6 @@ export const appRouter = router({
       .input(z.object({ userId: z.number() }))
       .query(async ({ input }) => {
         const profile = await db.getTutorProfileByUserId(input.userId);
-        console.log('[DEBUG tutorProfile.get] userId:', input.userId, 'timezone:', profile?.timezone);
         return profile;
       }),
     
@@ -240,6 +380,13 @@ export const appRouter = router({
         subjects: z.array(z.string()),
         gradeLevels: z.array(z.string()),
         timezone: z.string().optional(),
+        // Optional profile photo included at registration time
+        profileImage: z.object({
+          base64Data: z.string(),
+          fileName: z.string().max(255),
+          fileType: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/gif']),
+          fileSize: z.number().max(5 * 1024 * 1024),
+        }).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         // Determine if user is authenticated
@@ -255,6 +402,9 @@ export const appRouter = router({
           if (existingProfile && existingProfile.approvalStatus !== 'rejected') {
             throw new TRPCError({ code: 'BAD_REQUEST', message: 'You already have a tutor profile' });
           }
+
+          // Name and email are read-only for logged-in users on this form.
+          // Account details must be changed via Account Settings.
         } else {
           // NEW FLOW: User is NOT logged in
           // Check if email already exists
@@ -269,6 +419,17 @@ export const appRouter = router({
                 code: 'BAD_REQUEST',
                 message: 'A tutor application already exists for this email. Please sign in or use a different email.'
               });
+            }
+
+            // Update name on the existing user account in case it changed
+            const nameParts = input.name.trim().split(' ');
+            const firstName = nameParts[0];
+            const lastName = nameParts.slice(1).join(' ') || nameParts[0];
+            const dbConn = await db.getDb();
+            if (dbConn) {
+              await dbConn.update(users)
+                .set({ name: input.name, firstName, lastName })
+                .where(eq(users.id, existingUser.id));
             }
 
             userId = existingUser.id;
@@ -323,6 +484,24 @@ export const appRouter = router({
           profileId = created;
         }
 
+        // Upload profile image to S3 (or local dev storage) — non-fatal if it fails
+        if (input.profileImage) {
+          try {
+            const img = input.profileImage;
+            const base64Regex = /^[A-Za-z0-9+/]+=*$/;
+            const stripped = img.base64Data.replace(/\s/g, '');
+            const byteLength = Math.floor((stripped.length * 3) / 4);
+            if (base64Regex.test(stripped) && byteLength <= 500 * 1024) {
+              const imageBuffer = Buffer.from(stripped, 'base64');
+              const imageUrl = await uploadProfileImageToS3(imageBuffer, img.fileType, userId);
+              await db.updateTutorProfile(userId, { profileImageUrl: imageUrl });
+            }
+          } catch (imgErr) {
+            // Non-fatal: profile is created, image storage failure shouldn't block registration
+            console.error('[TutorRegistration] Profile image upload failed:', imgErr);
+          }
+        }
+
         // Notify admin about new tutor registration
         try {
           await notifyOwner({
@@ -330,8 +509,19 @@ export const appRouter = router({
             content: `A new tutor has registered and is pending approval:\n\nName: ${input.name}\nEmail: ${input.email}\nSubjects: ${input.subjects.join(', ')}\nExperience: ${input.yearsOfExperience} years\nHourly Rate: $${input.hourlyRate}\n\nPlease review and approve/reject this application in the admin dashboard.`
           });
         } catch (error) {
-          console.error('[TutorRegistration] Failed to send notification:', error);
-          // Don't fail the registration if notification fails
+          console.error('[TutorRegistration] Failed to send admin notification:', error);
+        }
+
+        // Send confirmation email to applicant
+        try {
+          await sendTutorApplicationReceivedEmail({
+            tutorName: input.name,
+            tutorEmail: input.email,
+            subjects: input.subjects,
+          });
+        } catch (error) {
+          console.error('[TutorRegistration] Failed to send confirmation email to applicant:', error);
+          // Don't fail the registration if email fails
         }
 
         return { success: true, userId, profileId };
@@ -455,6 +645,97 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    uploadProfileImage: tutorProcedure
+      .input(z.object({
+        fileName: z.string().max(255),
+        fileType: z.string(),
+        fileSize: z.number(),
+        base64Data: z.string(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        // Validate MIME type — images only
+        const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+        if (!allowedTypes.includes(input.fileType)) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'Invalid file type. Only JPEG, PNG, WebP, and GIF images are allowed.',
+          });
+        }
+
+        // Client already resizes to ≤400×400 @ 0.8 quality (~50–80KB).
+        // Enforce a generous 500KB ceiling on the decoded bytes as a safety net.
+        const maxBytes = 500 * 1024;
+        if (input.fileSize > maxBytes) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'Image size exceeds the 500 KB limit. Please crop to a smaller area.',
+          });
+        }
+
+        // Validate that base64Data is actually base64 (prevents data-URI injection)
+        const base64Regex = /^[A-Za-z0-9+/]+=*$/;
+        const stripped = input.base64Data.replace(/\s/g, '');
+        if (!base64Regex.test(stripped)) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'Invalid image data.',
+          });
+        }
+
+        // Server-side byte length check on decoded data
+        const byteLength = Math.floor((stripped.length * 3) / 4);
+        if (byteLength > maxBytes) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'Image size exceeds the 500 KB limit.',
+          });
+        }
+
+        // Decode base64 → Buffer and upload to S3 (or local dev storage)
+        const imageBuffer = Buffer.from(stripped, 'base64');
+
+        // Delete old image from S3 before replacing (best-effort)
+        const existingProfile = await db.getTutorProfileByUserId(ctx.user.id);
+        if (existingProfile?.profileImageUrl) {
+          await deleteProfileImageFromS3(existingProfile.profileImageUrl).catch(() => {});
+        }
+
+        const imageUrl = await uploadProfileImageToS3(imageBuffer, input.fileType, ctx.user.id);
+
+        const success = await db.updateTutorProfile(ctx.user.id, { profileImageUrl: imageUrl });
+
+        if (!success) {
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: 'Failed to save profile image.',
+          });
+        }
+
+        return { imageUrl };
+      }),
+
+    deleteProfileImage: tutorProcedure
+      .mutation(async ({ ctx }) => {
+        // Remove from S3 (or local dev storage) before clearing the DB record
+        const existingProfile = await db.getTutorProfileByUserId(ctx.user.id);
+        if (existingProfile?.profileImageUrl) {
+          await deleteProfileImageFromS3(existingProfile.profileImageUrl).catch(() => {});
+        }
+
+        const success = await db.updateTutorProfile(ctx.user.id, {
+          profileImageUrl: null,
+        });
+
+        if (!success) {
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: 'Failed to remove profile image.',
+          });
+        }
+
+        return { success: true };
+      }),
+
     getSimilar: publicProcedure
       .input(z.object({
         tutorId: z.number(),
@@ -503,7 +784,6 @@ export const appRouter = router({
       .input(z.object({ userId: z.number() }))
       .query(async ({ input }) => {
         const profile = await db.getParentProfileByUserId(input.userId);
-        console.log('[DEBUG parentProfile.get] userId:', input.userId, 'timezone:', profile?.timezone);
         return profile;
       }),
 
@@ -563,6 +843,11 @@ export const appRouter = router({
 
     getDashboardStats: parentProcedure.query(async ({ ctx }) => {
       return await db.getParentDashboardStats(ctx.user.id);
+    }),
+
+    getLastLogin: parentProcedure.query(async ({ ctx }) => {
+      const user = await db.getUserById(ctx.user.id);
+      return { lastSignedIn: user?.lastSignedIn ?? null };
     }),
 
     // Notification preferences (open to all authenticated users so tutors can reuse)
@@ -674,19 +959,23 @@ export const appRouter = router({
         return tutorsWithAvailability;
       }),
 
-    list: publicProcedure.query(async () => {
-      const courses = await db.getAllActiveCourses();
-      
-      // Add tutors to each course
-      const coursesWithTutors = await Promise.all(
-        courses.map(async (course) => {
-          const tutors = await db.getTutorsForCourse(course.id);
-          return { ...course, tutors };
-        })
-      );
-      
-      return coursesWithTutors;
-    }),
+    list: publicProcedure
+      .input(z.object({
+        region: z.enum(["global", "us", "india"]).optional(),
+      }).optional())
+      .query(async ({ input }) => {
+        const courses = await db.getAllActiveCourses(input?.region);
+
+        // Add tutors to each course
+        const coursesWithTutors = await Promise.all(
+          courses.map(async (course) => {
+            const tutors = await db.getTutorsForCourse(course.id);
+            return { ...course, tutors };
+          })
+        );
+
+        return coursesWithTutors;
+      }),
 
     search: publicProcedure
       .input(z.object({
@@ -765,19 +1054,22 @@ export const appRouter = router({
         studentFirstName: z.string(),
         studentLastName: z.string(),
         studentGrade: z.string(),
+        origin: z.string(),
+        promoCode: z.string().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         let subscriptionId: number | null = null;
 
         try {
+          const { createCheckoutSession: stripeCheckout } = await import("./stripe");
+
           // Get course details
           const course = await db.getCourseById(input.courseId);
           if (!course) {
             throw new TRPCError({ code: 'NOT_FOUND', message: 'Course not found' });
           }
 
-          // Prevent duplicate enrollment for the same student + subject
-          // Prevent duplicate enrollment for the same student + same course (not just subject)
+          // Prevent duplicate enrollment for the same student + same course
           const normalize = (v: string | null | undefined) => (v || "").trim().toLowerCase();
           const targetFirst = normalize(input.studentFirstName);
           const targetLast = normalize(input.studentLastName);
@@ -806,86 +1098,97 @@ export const appRouter = router({
             throw new TRPCError({ code: 'NOT_FOUND', message: 'No tutor found for this course' });
           }
 
-          // Fast-path: mark as fully paid without external checkout
-          const now = new Date();
-          const endDate = new Date();
-          endDate.setMonth(endDate.getMonth() + 3); // retain original 3-month window
+          const selectedTutorId = input.preferredTutorId || primaryTutor.tutorId;
 
-          // Always create a new subscription so multiple students can enroll in the same course
-          // without overwriting an existing subscription.
+          // Check sibling discount before creating subscription
+          const hasSiblingDiscount = await checkSiblingDiscount(
+            ctx.user.id,
+            input.studentFirstName,
+            input.studentLastName
+          );
+          const coursePrice = parseFloat(course.price);
+          const discountAmount = hasSiblingDiscount
+            ? Math.round(coursePrice * SIBLING_DISCOUNT_PERCENT) / 100
+            : 0;
+
+          // Create local subscription row (pending payment)
+          const now = new Date();
           subscriptionId = await db.createSubscription({
             parentId: ctx.user.id,
             courseId: input.courseId,
-            preferredTutorId: input.preferredTutorId,
+            preferredTutorId: selectedTutorId,
             studentFirstName: input.studentFirstName,
             studentLastName: input.studentLastName,
             studentGrade: input.studentGrade,
             status: "active",
             startDate: now,
-            endDate,
-            paymentStatus: "paid",
+            paymentStatus: "pending",
             paymentPlan: "full",
-            firstInstallmentPaid: true,
-            secondInstallmentPaid: true,
+            siblingDiscountApplied: hasSiblingDiscount,
+            discountAmount: hasSiblingDiscount ? discountAmount.toFixed(2) : null,
           });
 
           if (!subscriptionId) {
             throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create enrollment" });
           }
 
-          // Record payment as completed (errors are logged but won't block enrollment)
-          await db.createPayment({
-            parentId: ctx.user.id,
-            tutorId: primaryTutor.tutorId,
+          // Validate promo code if provided
+          let promoDiscountUsd = 0;
+          let appliedCouponId: number | null = null;
+          if (input.promoCode) {
+            const coupon = await db.getCouponByCode(input.promoCode);
+            if (!coupon || coupon.isUsed || coupon.userId !== ctx.user.id) {
+              throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid or expired promo code." });
+            }
+            // Resolve fixed discount amount based on course price tier
+            const referralDiscount = await db.getReferralDiscountForPrice(coursePrice);
+            promoDiscountUsd = referralDiscount.usd;
+            // Persist resolved amount on coupon and subscription
+            await db.updateCouponAmounts(coupon.id, { usd: referralDiscount.usd, inr: referralDiscount.inr });
+            appliedCouponId = coupon.id;
+          }
+
+          // Store promo discount on subscription so webhook can use it
+          if (promoDiscountUsd > 0) {
+            await db.updateSubscription(subscriptionId, { promoDiscountAmount: promoDiscountUsd.toString() });
+          }
+
+          // STRIPE_BYPASS=true — skip payment, mark as paid immediately
+          if (ENV.stripeBypass) {
+            await db.updateSubscription(subscriptionId, { paymentStatus: 'paid' });
+            if (appliedCouponId) await db.markCouponUsed(appliedCouponId);
+            await triggerReferralReward(ctx.user.id);
+            return { success: true, subscriptionId, checkoutUrl: null };
+          }
+
+          // Create Stripe Checkout session (one-time payment)
+          const session = await stripeCheckout({
+            priceAmount: coursePrice,
+            courseName: course.title,
+            courseId: course.id,
+            userId: ctx.user.id,
+            userEmail: ctx.user.email,
+            userName: ctx.user.name,
+            origin: input.origin,
             subscriptionId,
-            sessionId: null,
-            amount: course.price,
-            currency: "usd",
-            status: "completed",
-            stripePaymentIntentId: null,
-            paymentType: "subscription",
+            tutorId: selectedTutorId,
+            discountPercent: hasSiblingDiscount ? SIBLING_DISCOUNT_PERCENT : undefined,
+            discountAmountUsd: promoDiscountUsd > 0 ? promoDiscountUsd : undefined,
+            discountLabel: hasSiblingDiscount && promoDiscountUsd > 0
+              ? `${SIBLING_DISCOUNT_PERCENT}% sibling + $${promoDiscountUsd} promo`
+              : hasSiblingDiscount ? `${SIBLING_DISCOUNT_PERCENT}% sibling`
+              : promoDiscountUsd > 0 ? `$${promoDiscountUsd} promo`
+              : undefined,
           });
 
-          // Send confirmation email (non-blocking)
-          if (ctx.user.email && ctx.user.name) {
-            const preferredTutor = input.preferredTutorId
-              ? tutors.find(t => t.tutorId === input.preferredTutorId)
-              : primaryTutor;
-            const tutorName = preferredTutor?.user.name || primaryTutor?.user.name || "Your tutor";
-            const studentName = [input.studentFirstName, input.studentLastName].filter(Boolean).join(" ");
-
-            sendEnrollmentConfirmation({
-              userEmail: ctx.user.email,
-              userName: ctx.user.name,
-              courseName: course.title,
-              tutorName,
-              studentName,
-              coursePrice: formatEmailPrice(Math.round(parseFloat(course.price) * 100)),
-              courseId: course.id,
-            }).catch(err => console.error('[Email] Failed to send enrollment confirmation:', err));
-
-            // Notify preferred tutor
-            if (preferredTutor?.user.email) {
-              sendTutorEnrollmentNotification({
-                tutorEmail: preferredTutor.user.email,
-                tutorName,
-                studentName,
-                parentName: ctx.user.name,
-                courseName: course.title,
-                coursePrice: formatEmailPrice(Math.round(parseFloat(course.price) * 100)),
-              }).catch(err => console.error('[Email] Failed to send tutor enrollment notification:', err));
-            }
-          }
-
-          return { success: true, subscriptionId };
+          return { success: true, subscriptionId, checkoutUrl: session.url, siblingDiscount: hasSiblingDiscount };
         } catch (err) {
           console.error('[createCheckoutSession] Enrollment flow failed:', err);
-          // If subscription was created, still return success so the UI doesn't show a hard error.
+          if (err instanceof TRPCError) throw err;
           if (subscriptionId) {
-            return { success: true, subscriptionId, warning: 'post-create step failed' };
+            return { success: true, subscriptionId, checkoutUrl: null, warning: 'post-create step failed' };
           }
-          // Avoid throwing to prevent 500 in UI; instead return a soft failure the client can handle.
-          return { success: false, message: 'Failed to process enrollment' };
+          return { success: false, message: 'Failed to process enrollment', checkoutUrl: null };
         }
       }),
 
@@ -896,6 +1199,8 @@ export const appRouter = router({
         studentFirstName: z.string(),
         studentLastName: z.string(),
         studentGrade: z.string(),
+        origin: z.string(),
+        promoCode: z.string().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         // Get course details
@@ -926,89 +1231,43 @@ export const appRouter = router({
           });
         }
 
-        // Create subscription with pending payment status
-        const subscription = await db.createSubscription({
-          parentId: ctx.user.id,
-          courseId: input.courseId,
-          preferredTutorId: input.preferredTutorId,
-          studentFirstName: input.studentFirstName,
-          studentLastName: input.studentLastName,
-          studentGrade: input.studentGrade,
-          status: 'active',
-          startDate: new Date(),
-          paymentStatus: 'pending',
-        });
-
-        if (!subscription) {
-          throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to create enrollment' });
-        }
-
-        return { success: true, subscriptionId: subscription };
-      }),
-
-    enrollWithInstallment: parentProcedure
-      .input(z.object({
-        courseId: z.number(),
-        preferredTutorId: z.number().optional(),
-        studentFirstName: z.string(),
-        studentLastName: z.string(),
-        studentGrade: z.string(),
-      }))
-      .mutation(async ({ ctx, input }) => {
-        const { default: Stripe } = await import('stripe');
-        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2025-12-15.clover' });
-
-        // Get course details
-        const course = await db.getCourseById(input.courseId);
-        if (!course) {
-          throw new TRPCError({ code: 'NOT_FOUND', message: 'Course not found' });
-        }
-
-        // Prevent duplicate enrollment for the same student + subject
-        const normalize = (v: string | null | undefined) => (v || "").trim().toLowerCase();
-        const targetFirst = normalize(input.studentFirstName);
-        const targetLast = normalize(input.studentLastName);
-        const existingSubscriptions = await db.getSubscriptionsByParentId(ctx.user.id);
-        const duplicate = existingSubscriptions.some((s: any) => {
-          const sub = s.subscription;
-          const c = s.course;
-          if (!sub || !c) return false;
-          if (sub.status === "cancelled") return false;
-          return (
-            normalize(sub.studentFirstName) === targetFirst &&
-            normalize(sub.studentLastName) === targetLast &&
-            normalize(c.subject) === normalize(course.subject)
-          );
-        });
-        if (duplicate) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: "This student is already enrolled in this subject.",
-          });
-        }
-
-        // Verify course price is over $500
-        const coursePrice = parseFloat(course.price);
-        if (coursePrice <= 500) {
-          throw new TRPCError({ code: 'BAD_REQUEST', message: 'Installment payment is only available for courses over $500' });
-        }
-
-        // Calculate installment amounts (50% each)
-        const firstInstallment = coursePrice / 2;
-        const secondInstallment = coursePrice / 2;
-
-        // Get tutors for the course
+        // Get primary tutor for the course
         const tutors = await db.getTutorsForCourse(input.courseId);
-        const primaryTutor = tutors.find(t => t.isPrimary) || tutors[0];
+        const primaryTutor = tutors.find((t: any) => t.isPrimary) || tutors[0];
         if (!primaryTutor) {
           throw new TRPCError({ code: 'NOT_FOUND', message: 'No tutor found for this course' });
         }
-
-        // Use preferred tutor if provided, otherwise use primary tutor
         const selectedTutorId = input.preferredTutorId || primaryTutor.tutorId;
 
-        // Create subscription with installment payment plan
-        const subscription = await db.createSubscription({
+        // Check sibling discount
+        const hasSiblingDiscount = await checkSiblingDiscount(
+          ctx.user.id,
+          input.studentFirstName,
+          input.studentLastName
+        );
+        const coursePrice = parseFloat(course.price);
+        const discountAmount = hasSiblingDiscount
+          ? Math.round(coursePrice * SIBLING_DISCOUNT_PERCENT) / 100
+          : 0;
+
+        // Validate promo code if provided
+        let promoDiscountUsd = 0;
+        let appliedCouponId: number | null = null;
+        if (input.promoCode) {
+          const coupon = await db.getCouponByCode(input.promoCode);
+          if (!coupon || coupon.isUsed || coupon.userId !== ctx.user.id) {
+            throw new TRPCError({ code: 'BAD_REQUEST', message: 'Invalid or expired promo code.' });
+          }
+          // Resolve fixed discount amount based on course price tier
+          const referralDiscount = await db.getReferralDiscountForPrice(coursePrice);
+          promoDiscountUsd = referralDiscount.usd;
+          await db.updateCouponAmounts(coupon.id, { usd: referralDiscount.usd, inr: referralDiscount.inr });
+          appliedCouponId = coupon.id;
+        }
+
+        // Create local subscription row (billing anchored to today)
+        const now = new Date();
+        const subscriptionId = await db.createSubscription({
           parentId: ctx.user.id,
           courseId: input.courseId,
           preferredTutorId: selectedTutorId,
@@ -1016,49 +1275,152 @@ export const appRouter = router({
           studentLastName: input.studentLastName,
           studentGrade: input.studentGrade,
           status: 'active',
-          startDate: new Date(),
+          startDate: now,
           paymentStatus: 'pending',
-          paymentPlan: 'installment',
-          firstInstallmentPaid: false,
-          secondInstallmentPaid: false,
-          firstInstallmentAmount: firstInstallment.toFixed(2),
-          secondInstallmentAmount: secondInstallment.toFixed(2),
+          paymentPlan: 'monthly',
+          siblingDiscountApplied: hasSiblingDiscount,
+          promoDiscountAmount: promoDiscountUsd.toString(),
+          discountAmount: hasSiblingDiscount ? discountAmount.toFixed(2) : null,
         });
 
-        if (!subscription) {
+        if (!subscriptionId) {
           throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to create enrollment' });
         }
 
-        // Create Stripe checkout session for first installment
-        const session = await stripe.checkout.sessions.create({
-          payment_method_types: ['card'],
-          line_items: [
-            {
-              price_data: {
-                currency: 'usd',
-                product_data: {
-                  name: `${course.title} - First Installment (1 of 2)`,
-                  description: `Student: ${input.studentFirstName} ${input.studentLastName} | Tutor: ${primaryTutor.user.name || 'TBD'}`,
-                },
-                unit_amount: Math.round(firstInstallment * 100),
-              },
-              quantity: 1,
-            },
-          ],
-          mode: 'payment',
-          success_url: `${ctx.req.protocol}://${ctx.req.get('host')}/dashboard?payment=success`,
-          cancel_url: `${ctx.req.protocol}://${ctx.req.get('host')}/course/${input.courseId}?payment=cancelled`,
-          metadata: {
-            subscriptionId: subscription.toString(),
-            courseId: input.courseId.toString(),
-            parentId: ctx.user.id.toString(),
-            installmentNumber: '1',
-            paymentType: 'installment',
-          },
+        // Mark coupon used immediately so it can't be reused on another enrollment
+        if (appliedCouponId) await db.markCouponUsed(appliedCouponId);
+
+        // STRIPE_BYPASS=true — skip payment collection, mark as paid immediately
+        if (ENV.stripeBypass) {
+          await db.updateSubscription(subscriptionId, { paymentStatus: 'paid' });
+          await triggerReferralReward(ctx.user.id);
+          return { success: true, subscriptionId, setupUrl: null };
+        }
+
+        // Create Stripe Customer + Setup Checkout to collect card.
+        // The Stripe Subscription is created in the webhook after the card is saved.
+        let setupUrl: string | null = null;
+        if (ctx.user.email) {
+          try {
+            const { getOrCreateStripeCustomer, createSetupCheckoutSession } = await import("./stripe");
+            const parentUser = await db.getUserById(ctx.user.id);
+            const stripeCustomerId = await getOrCreateStripeCustomer({
+              userId: ctx.user.id,
+              email: ctx.user.email,
+              name: ctx.user.name,
+              existingStripeCustomerId: parentUser?.stripeCustomerId,
+            });
+
+            // Always persist — handles case where old customer ID was stale/deleted
+            if (stripeCustomerId !== parentUser?.stripeCustomerId) {
+              await db.updateUserStripeCustomerId(ctx.user.id, stripeCustomerId);
+            }
+
+            // Create setup checkout so parent can save their card
+            const setupSession = await createSetupCheckoutSession({
+              stripeCustomerId,
+              origin: input.origin,
+              courseId: input.courseId,
+              subscriptionId,
+            });
+            setupUrl = setupSession.url;
+          } catch (err) {
+            // Non-fatal — local enrollment still created
+            console.error('[enrollWithoutPayment] Failed to create Stripe setup:', err);
+          }
+        }
+
+        return { success: true, subscriptionId, setupUrl, siblingDiscount: hasSiblingDiscount };
+      }),
+
+    retryCheckout: parentProcedure
+      .input(z.object({
+        subscriptionId: z.number(),
+        origin: z.string(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { createCheckoutSession: stripeCheckout } = await import("./stripe");
+
+        const localSub = await db.getSubscriptionById(input.subscriptionId);
+        if (!localSub || localSub.parentId !== ctx.user.id) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Subscription not found" });
+        }
+        if (localSub.paymentStatus !== "pending") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Subscription is not pending payment" });
+        }
+
+        const course = await db.getCourseById(localSub.courseId);
+        if (!course) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Course not found" });
+        }
+
+        const session = await stripeCheckout({
+          priceAmount: parseFloat(course.price),
+          courseName: course.title,
+          courseId: course.id,
+          userId: ctx.user.id,
+          userEmail: ctx.user.email,
+          userName: ctx.user.name,
+          origin: input.origin,
+          subscriptionId: input.subscriptionId,
+          tutorId: localSub.preferredTutorId ?? undefined,
+          discountPercent: localSub.siblingDiscountApplied ? SIBLING_DISCOUNT_PERCENT : undefined,
+          discountAmountUsd: (() => {
+            const p = parseFloat(localSub.promoDiscountAmount ?? "0");
+            return p > 0 ? p : undefined;
+          })(),
+          discountLabel: (() => {
+            const s = localSub.siblingDiscountApplied ? SIBLING_DISCOUNT_PERCENT : 0;
+            const p = parseFloat(localSub.promoDiscountAmount ?? "0");
+            if (s > 0 && p > 0) return `${s}% sibling + $${p} promo`;
+            if (s > 0) return `${s}% sibling`;
+            if (p > 0) return `$${p} promo`;
+            return undefined;
+          })(),
         });
 
-        return { checkoutUrl: session.url, subscriptionId: subscription };
+        return { checkoutUrl: session.url };
       }),
+
+    getSetupUrl: parentProcedure
+      .input(z.object({
+        subscriptionId: z.number(),
+        origin: z.string(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const { getOrCreateStripeCustomer, createSetupCheckoutSession } = await import("./stripe");
+
+        const localSub = await db.getSubscriptionById(input.subscriptionId);
+        if (!localSub || localSub.parentId !== ctx.user.id) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Subscription not found" });
+        }
+
+        if (!ctx.user.email) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Parent account must have an email address" });
+        }
+
+        const parentUser = await db.getUserById(ctx.user.id);
+        const stripeCustomerId = await getOrCreateStripeCustomer({
+          userId: ctx.user.id,
+          email: ctx.user.email,
+          name: ctx.user.name,
+          existingStripeCustomerId: parentUser?.stripeCustomerId,
+        });
+
+        if (stripeCustomerId !== parentUser?.stripeCustomerId) {
+          await db.updateUserStripeCustomerId(ctx.user.id, stripeCustomerId);
+        }
+
+        const setupSession = await createSetupCheckoutSession({
+          stripeCustomerId,
+          origin: input.origin,
+          courseId: localSub.courseId,
+          subscriptionId: input.subscriptionId,
+        });
+
+        return { setupUrl: setupSession.url };
+      }),
+
   }),
 
   tutorCoursePreferences: router({
@@ -1096,13 +1458,56 @@ export const appRouter = router({
 
   // Subscription Management
   subscription: router({
+    checkSiblingDiscount: parentProcedure
+      .input(z.object({
+        studentFirstName: z.string(),
+        studentLastName: z.string(),
+      }))
+      .query(async ({ ctx, input }) => {
+        if (!input.studentFirstName || !input.studentLastName) {
+          return { eligible: false, discountPercent: 0 };
+        }
+        const eligible = await checkSiblingDiscount(ctx.user.id, input.studentFirstName, input.studentLastName);
+        return { eligible, discountPercent: eligible ? SIBLING_DISCOUNT_PERCENT : 0 };
+      }),
+
     mySubscriptions: parentProcedure.query(async ({ ctx }) => {
       const subs = await db.getSubscriptionsByParentId(ctx.user.id);
 
-      // Enhance each subscription with session statistics
+      // Enhance each subscription with session statistics and next billing info
       const enhancedSubs = await Promise.all(
         subs.map(async (sub) => {
           const sessionStats = await db.getSessionStatsBySubscription(sub.subscription.id);
+
+          let nextBillingDate: number | null = null;
+          let nextBillingAmount: number | null = null;
+
+          // For monthly subs with a linked Stripe subscription, fetch next billing cycle
+          if (
+            sub.subscription.paymentPlan === "monthly" &&
+            sub.subscription.paymentStatus === "paid" &&
+            sub.subscription.stripeSubscriptionId
+          ) {
+            try {
+              const { getStripe } = await import("./stripe");
+              const stripe = getStripe();
+              const stripeSub = await stripe.subscriptions.retrieve(
+                sub.subscription.stripeSubscriptionId
+              );
+              // current_period_end is the next billing date (Unix timestamp in seconds)
+              nextBillingDate = (stripeSub as any).current_period_end * 1000; // convert to ms
+              // Find the matching item's price amount
+              const item = stripeSub.items.data.find(
+                (i) => i.id === sub.subscription.stripeItemId
+              ) || stripeSub.items.data[0];
+              if (item?.price?.unit_amount) {
+                nextBillingAmount = item.price.unit_amount / 100; // cents → dollars
+              }
+            } catch (err) {
+              // Non-fatal — just won't show next billing info
+            }
+          }
+
           return {
             ...sub,
             sessionStats: sessionStats || {
@@ -1111,7 +1516,9 @@ export const appRouter = router({
               completedCount: 0,
               scheduledCount: 0,
               totalSessions: 0
-            }
+            },
+            nextBillingDate,
+            nextBillingAmount,
           };
         })
       );
@@ -1323,6 +1730,12 @@ export const appRouter = router({
             ...session,
             courseTitle: row.courseTitle,
             courseSubject: row.courseSubject,
+            courseQuizEnabled: row.courseQuizEnabled ?? false,
+            hasQuiz: !!row.hasQuiz,
+            quizStatus: row.quizStatus ?? null,
+            quizScore: row.quizScore ?? null,
+            quizCorrectCount: row.quizCorrectCount ?? null,
+            quizTotalCount: row.quizTotalCount ?? null,
             tutorName: row.tutorName,
             parentName: row.parentName,
             studentFirstName: row.studentFirstName,
@@ -1783,6 +2196,24 @@ export const appRouter = router({
               : undefined;
 
             if (course && tutor && parent && tutor.name && parent.name && tutor.email && parent.email) {
+              // Build additional sessions list (all sessions after the first)
+              const additionalSessionsForParent = sessionIds.slice(1).map(id => {
+                const ts = input.sessions[sessionIds.indexOf(id)]?.scheduledAt ?? 0;
+                const d = new Date(ts);
+                return {
+                  date: formatEmailDate(d, parentProfile?.timezone || undefined),
+                  time: formatEmailTime(d, parentProfile?.timezone || undefined),
+                };
+              });
+              const additionalSessionsForTutor = sessionIds.slice(1).map(id => {
+                const ts = input.sessions[sessionIds.indexOf(id)]?.scheduledAt ?? 0;
+                const d = new Date(ts);
+                return {
+                  date: formatEmailDate(d, tutorProfile?.timezone || undefined),
+                  time: formatEmailTime(d, tutorProfile?.timezone || undefined),
+                };
+              });
+
               // Send email to parent
               sendBookingConfirmation({
                 userEmail: parent.email,
@@ -1795,6 +2226,7 @@ export const appRouter = router({
                 sessionTime: formatEmailTime(sessionDate, parentProfile?.timezone || undefined),
                 sessionDuration: `${firstSession.duration} minutes`,
                 sessionPrice: formatEmailPrice(parseInt(course.price) * 100),
+                additionalSessions: additionalSessionsForParent.length > 0 ? additionalSessionsForParent : undefined,
               }).catch(err => console.error('[Email] Failed to send booking confirmation to parent:', err));
 
               // Send email to tutor
@@ -1808,6 +2240,7 @@ export const appRouter = router({
                 sessionTime: formatEmailTime(sessionDate, tutorProfile?.timezone || undefined),
                 sessionDuration: `${firstSession.duration} minutes`,
                 sessionPrice: formatEmailPrice(parseInt(course.price) * 100),
+                additionalSessions: additionalSessionsForTutor.length > 0 ? additionalSessionsForTutor : undefined,
               }).catch(err => console.error('[Email] Failed to send booking confirmation to tutor:', err));
 
               // Create in-app notification for tutor
@@ -2119,6 +2552,59 @@ export const appRouter = router({
         const success = await db.updateSession(id, updates);
         if (!success) {
           throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to update session' });
+        }
+
+        // Send session notes email when tutor saves notes on a completed session (only once - first time notes are saved)
+        const isFirstTimeNotes = input.feedbackFromTutor && !session.feedbackFromTutor;
+        if (
+          isFirstTimeNotes &&
+          ctx.user.role === 'tutor' &&
+          (input.status === 'completed' || (!input.status && session.status === 'completed'))
+        ) {
+          try {
+            const parent = await db.getUserById(session.parentId);
+            const tutor = await db.getUserById(session.tutorId);
+
+            if (parent?.email && tutor) {
+              const subscription = session.subscriptionId ? await db.getSubscriptionById(session.subscriptionId) : null;
+              const parentProfile = await db.getParentProfileByUserId(parent.id);
+              const sessionDate = new Date(session.scheduledAt);
+
+              const studentName = subscription
+                ? [subscription.studentFirstName, subscription.studentLastName].filter(Boolean).join(' ').trim() || 'your child'
+                : 'your child';
+
+              let courseName = 'the course';
+              if (session.courseId) {
+                const course = await db.getCourseById(session.courseId);
+                if (course?.title) courseName = course.title;
+              } else if (subscription) {
+                const course = await db.getCourseById(subscription.courseId);
+                if (course?.title) courseName = course.title;
+              }
+
+              const emailHtml = await sendSessionNotesEmail({
+                parentName: parent.name || parent.email,
+                studentName,
+                tutorName: tutor.name || `${(tutor as any).firstName || ''} ${(tutor as any).lastName || ''}`.trim() || 'Your tutor',
+                courseName,
+                sessionDate: formatEmailDate(sessionDate, parentProfile?.timezone || undefined),
+                sessionTime: formatEmailTime(sessionDate, parentProfile?.timezone || undefined),
+                progressSummary: input.feedbackFromTutor || "",
+                notesUrl: `${process.env.VITE_FRONTEND_FORGE_API_URL || ''}/session-notes`,
+              });
+
+              await emailService.sendEmail({
+                to: parent.email,
+                subject: `Session Notes for ${studentName} — ${courseName}`,
+                html: emailHtml,
+              });
+
+              console.log('[Session Notes Email] Sent to parent:', parent.email);
+            }
+          } catch (emailError) {
+            console.error('[Session Notes Email] Failed to send:', emailError);
+          }
         }
 
         // Send email notification to parent if session is marked as no-show
@@ -2560,75 +3046,327 @@ export const appRouter = router({
   payment: router({
     getPaymentHistory: parentProcedure
       .query(async ({ ctx }) => {
-        // Get all payments for this parent
-        const payments = await db.getPaymentsByParentId(ctx.user.id);
-        
-        // Enrich payment data with course, tutor, and student information
-        const enrichedPayments = await Promise.all(
-          payments.map(async (payment) => {
-            let courseName = null;
-            let tutorName = null;
-            let studentName = null;
-            let installmentInfo = null;
-            
-            // Get subscription details if available
-            if (payment.subscriptionId) {
-              const subscription = await db.getSubscriptionById(payment.subscriptionId);
-              if (subscription) {
-                // Get course name
-                const course = await db.getCourseById(subscription.courseId);
-                if (course) {
-                  courseName = course.title;
-                }
-                
-                // Get student name
-                if (subscription.studentFirstName && subscription.studentLastName) {
-                  studentName = `${subscription.studentFirstName} ${subscription.studentLastName}`;
-                }
-                
-                // Get installment info if applicable
-                if (subscription.paymentPlan === 'installment') {
-                  const firstAmount = parseFloat(subscription.firstInstallmentAmount || '0');
-                  const secondAmount = parseFloat(subscription.secondInstallmentAmount || '0');
-                  const paidAmount = parseFloat(payment.amount);
-                  
-                  // Determine which installment this is
-                  let installmentNumber = 1;
-                  if (subscription.firstInstallmentPaid && Math.abs(paidAmount - secondAmount) < 0.01) {
-                    installmentNumber = 2;
-                  }
-                  
-                  installmentInfo = {
-                    installmentNumber,
-                    totalInstallments: 2,
-                  };
-                }
+        const { listStripeInvoicesForCustomer } = await import("./stripe");
+
+        // Fetch enriched payments from local DB (single query with joins)
+        const localPayments = await db.getParentPayments(ctx.user.id);
+
+        // Optionally enrich with Stripe invoice PDF URLs
+        const parentUser = await db.getUserById(ctx.user.id);
+        const stripeInvoiceMap: Record<string, string> = {};
+
+        if (parentUser?.stripeCustomerId) {
+          try {
+            const invoices = await listStripeInvoicesForCustomer(parentUser.stripeCustomerId);
+            for (const inv of invoices) {
+              if (inv.id && inv.invoice_pdf) {
+                stripeInvoiceMap[inv.id] = inv.invoice_pdf;
               }
             }
-            
-            // Get tutor name
-            const tutor = await db.getUserById(payment.tutorId);
-            if (tutor) {
-              tutorName = tutor.name;
-            }
-            
-            return {
-              id: payment.id,
-              amount: payment.amount,
-              currency: payment.currency,
-              status: payment.status,
-              paymentType: payment.paymentType,
-              stripePaymentIntentId: payment.stripePaymentIntentId,
-              createdAt: payment.createdAt,
-              courseName,
-              tutorName,
-              studentName,
-              installmentInfo,
+          } catch (err) {
+            console.error("[getPaymentHistory] Stripe invoice fetch failed (non-fatal):", err);
+          }
+        }
+
+        return localPayments.map(p => ({
+          ...p,
+          invoicePdfUrl: p.stripeInvoiceId ? (stripeInvoiceMap[p.stripeInvoiceId] ?? null) : null,
+        }));
+      }),
+
+    getStripeInvoices: parentProcedure
+      .query(async ({ ctx }) => {
+        const parentUser = await db.getUserById(ctx.user.id);
+        const results: Array<{
+          id: string;
+          number: string | null;
+          status: string;
+          amountPaid: number;
+          amountDue: number;
+          currency: string;
+          periodStart: number;
+          periodEnd: number;
+          created: number;
+          hostedInvoiceUrl: string | null;
+          invoicePdf: string | null;
+          source: "stripe" | "local";
+          studentName: string | null;
+          courseTitle: string | null;
+          paymentNumber: number | null;
+          totalPayments: number | null;
+          lines: Array<{
+            id: string;
+            description: string | null;
+            amount: number;
+            currency: string;
+            studentName?: string | null;
+            courseTitle?: string | null;
+            paymentNumber?: number | null;
+            totalPayments?: number | null;
+          }>;
+        }> = [];
+
+        // Track which Stripe subscription IDs have at least one real paid invoice (amount > 0)
+        const paidStripeSubIds = new Set<string>();
+
+        // Fetch Stripe invoices if customer exists
+        if (parentUser?.stripeCustomerId) {
+          try {
+            const { listStripeInvoicesForCustomer } = await import("./stripe");
+            const invoices = await listStripeInvoicesForCustomer(parentUser.stripeCustomerId);
+
+            // Helper to extract subscription ID from new Invoice parent structure
+            const getInvSubId = (inv: any): string | null => {
+              const sub = (inv.parent as any)?.subscription_details?.subscription;
+              return typeof sub === "string" ? sub : sub?.id ?? null;
             };
-          })
-        );
-        
-        return enrichedPayments;
+
+            // Group invoice created timestamps per Stripe subscription for payment number
+            const subInvoiceMap: Record<string, number[]> = {};
+            for (const inv of invoices) {
+              const subId = getInvSubId(inv);
+              if (subId) {
+                if (!subInvoiceMap[subId]) subInvoiceMap[subId] = [];
+                subInvoiceMap[subId].push(inv.created);
+              }
+            }
+            for (const subId of Object.keys(subInvoiceMap)) {
+              subInvoiceMap[subId].sort((a, b) => a - b);
+            }
+
+            for (const inv of invoices) {
+              // Skip $0 trial invoices — they're noise (card setup confirmation)
+              if (inv.status === "paid" && inv.amount_paid === 0) continue;
+
+              const stripeSubId = getInvSubId(inv);
+
+              // Track subscriptions that have real paid invoices
+              if (stripeSubId && inv.status === "paid" && inv.amount_paid > 0) {
+                paidStripeSubIds.add(stripeSubId);
+              }
+
+              const lineItems = inv.lines?.data ?? [];
+
+              // Build enriched line items by matching each to a local subscription via stripeItemId
+              const enrichedLines: Array<{
+                id: string;
+                description: string | null;
+                amount: number;
+                currency: string;
+                studentName: string | null;
+                courseTitle: string | null;
+                paymentNumber: number | null;
+                totalPayments: number | null;
+              }> = [];
+
+              for (const line of lineItems) {
+                const stripeItemId = (line.parent as any)?.subscription_item_details?.subscription_item as string | null;
+                let lineStudentName: string | null = null;
+                let lineCourseTitle: string | null = null;
+                let linePaymentNumber: number | null = null;
+                let lineTotalPayments: number | null = null;
+
+                if (stripeItemId) {
+                  const localSub = await db.getSubscriptionByStripeItemId(stripeItemId);
+                  if (localSub) {
+                    lineStudentName = [localSub.studentFirstName, localSub.studentLastName].filter(Boolean).join(" ") || null;
+                    const course = await db.getCourseById(localSub.courseId);
+                    if (course) {
+                      lineCourseTitle = course.title;
+                      const totalSessions = course.totalSessions || 1;
+                      const sessionsPerWeek = course.sessionsPerWeek || 1;
+                      const sessionsPerMonth = sessionsPerWeek * 4;
+                      lineTotalPayments = Math.max(1, Math.ceil(totalSessions / sessionsPerMonth));
+                    }
+                  }
+                }
+
+                if (stripeSubId) {
+                  const sortedCreated = subInvoiceMap[stripeSubId] ?? [];
+                  const idx = sortedCreated.indexOf(inv.created);
+                  linePaymentNumber = idx >= 0 ? idx + 1 : null;
+                }
+
+                enrichedLines.push({
+                  id: line.id,
+                  description: line.description ?? null,
+                  amount: line.amount,
+                  currency: line.currency,
+                  studentName: lineStudentName,
+                  courseTitle: lineCourseTitle,
+                  paymentNumber: linePaymentNumber,
+                  totalPayments: lineTotalPayments,
+                });
+              }
+
+              // For the invoice header, use data from first line item (or aggregate)
+              const firstLine = enrichedLines[0] ?? null;
+              const multiCourse = enrichedLines.length > 1;
+
+              results.push({
+                id: inv.id,
+                number: inv.number ?? null,
+                status: inv.status ?? "unknown",
+                amountPaid: inv.amount_paid,
+                amountDue: inv.amount_due,
+                currency: inv.currency,
+                periodStart: inv.period_start,
+                periodEnd: inv.period_end,
+                created: inv.created,
+                hostedInvoiceUrl: inv.hosted_invoice_url ?? null,
+                invoicePdf: inv.invoice_pdf ?? null,
+                source: "stripe",
+                studentName: multiCourse ? null : (firstLine?.studentName ?? null),
+                courseTitle: multiCourse ? null : (firstLine?.courseTitle ?? null),
+                paymentNumber: multiCourse ? null : (firstLine?.paymentNumber ?? null),
+                totalPayments: multiCourse ? null : (firstLine?.totalPayments ?? null),
+                lines: enrichedLines,
+              });
+            }
+          } catch (err) {
+            console.error("[getStripeInvoices] Failed to fetch Stripe invoices:", err);
+          }
+        }
+
+        // Add upcoming invoice entries for active monthly subscriptions
+        // so parents can see what's coming before real invoices are generated
+        if (parentUser?.stripeCustomerId) {
+          try {
+            const { getStripe } = await import("./stripe");
+            const stripe = getStripe();
+            const activeSubs = await db.getSubscriptionsByParentId(ctx.user.id);
+            const monthlyActive = activeSubs.filter((s: any) =>
+              s.subscription.paymentPlan === "monthly" &&
+              s.subscription.paymentStatus === "paid" &&
+              s.subscription.stripeSubscriptionId
+            );
+
+            const seenStripeSubIds = new Set<string>();
+            for (const sub of monthlyActive) {
+              const stripeSubId = sub.subscription.stripeSubscriptionId!;
+              if (seenStripeSubIds.has(stripeSubId)) continue;
+              seenStripeSubIds.add(stripeSubId);
+
+              try {
+                const stripeSub = await stripe.subscriptions.retrieve(stripeSubId) as any;
+                // For trialing subs the first charge is at trial_end; for active subs use current_period_end
+                const nextBillingTs = stripeSub.status === "trialing"
+                  ? (stripeSub.trial_end ?? stripeSub.current_period_end)
+                  : stripeSub.current_period_end;
+                if (!nextBillingTs) continue;
+
+                // Skip if the subscription is cancelled/incomplete
+                if (["canceled", "incomplete", "incomplete_expired", "past_due", "unpaid"].includes(stripeSub.status)) continue;
+
+                // Only show upcoming entry while no real charges have been taken yet
+                if (paidStripeSubIds.has(stripeSubId)) continue;
+
+                // Gather all local subscriptions sharing this stripe sub
+                const sharedSubs = monthlyActive.filter(
+                  (s: any) => s.subscription.stripeSubscriptionId === stripeSubId
+                );
+
+                const lines = sharedSubs.map((s: any) => {
+                  const item = stripeSub.items.data.find(
+                    (i: any) => i.id === s.subscription.stripeItemId
+                  );
+                  const amount = item?.price?.unit_amount ?? 0;
+                  const studentName = [s.subscription.studentFirstName, s.subscription.studentLastName]
+                    .filter(Boolean).join(" ") || null;
+                  return {
+                    id: `upcoming_line_${s.subscription.id}`,
+                    description: s.course?.title ?? null,
+                    amount,
+                    currency: item?.price?.currency ?? "usd",
+                    studentName,
+                    courseTitle: s.course?.title ?? null,
+                    paymentNumber: 1,
+                    totalPayments: (() => {
+                      const totalSessions = s.course?.totalSessions || 1;
+                      const sessionsPerWeek = s.course?.sessionsPerWeek || 1;
+                      return Math.max(1, Math.ceil(totalSessions / (sessionsPerWeek * 4)));
+                    })(),
+                  };
+                });
+
+                const totalAmountCents = lines.reduce((sum: number, l: any) => sum + l.amount, 0);
+                const currency = lines[0]?.currency ?? "usd";
+                const multiCourse = lines.length > 1;
+
+                results.push({
+                  id: `upcoming_${stripeSubId}`,
+                  number: null,
+                  status: "upcoming",
+                  amountPaid: 0,
+                  amountDue: totalAmountCents,
+                  currency,
+                  periodStart: nextBillingTs,
+                  periodEnd: nextBillingTs,
+                  created: nextBillingTs,
+                  hostedInvoiceUrl: null,
+                  invoicePdf: null,
+                  source: "stripe",
+                  studentName: multiCourse ? null : (lines[0]?.studentName ?? null),
+                  courseTitle: multiCourse ? null : (lines[0]?.courseTitle ?? null),
+                  paymentNumber: multiCourse ? null : 1,
+                  totalPayments: multiCourse ? null : lines[0]?.totalPayments ?? null,
+                  lines,
+                });
+              } catch (err) {
+                console.error(`[getStripeInvoices] Failed to build upcoming entry for sub ${stripeSubId}:`, err);
+              }
+            }
+          } catch (err) {
+            console.error("[getStripeInvoices] Failed to build upcoming invoices:", err);
+          }
+        }
+
+        // Also include local payment records that have no Stripe invoice
+        // (pay-in-full via Stripe Checkout, or legacy payments)
+        const localPayments = await db.getParentPayments(ctx.user.id);
+        const stripeInvoiceIds = new Set(results.map(r => r.id));
+
+        for (const p of localPayments) {
+          // Skip if already covered by a Stripe invoice
+          if (p.stripeInvoiceId && stripeInvoiceIds.has(p.stripeInvoiceId)) continue;
+          if (p.status !== "completed") continue;
+          // Skip $0 records — these are card-setup confirmations, not real payments
+          if (!p.amount || parseFloat(p.amount) === 0) continue;
+
+          const createdAtMs = p.createdAt ? new Date(p.createdAt).getTime() : Date.now();
+          const createdTs = Math.floor(createdAtMs / 1000);
+          const studentName = [p.studentFirstName, p.studentLastName].filter(Boolean).join(" ");
+          const description = [studentName, p.courseTitle].filter(Boolean).join(" — ") || "Course payment";
+
+          results.push({
+            id: `local_${p.id}`,
+            number: null,
+            status: "paid",
+            amountPaid: Math.round(parseFloat(p.amount) * 100),
+            amountDue: 0,
+            currency: p.currency || "usd",
+            periodStart: createdTs,
+            periodEnd: createdTs,
+            created: createdTs,
+            hostedInvoiceUrl: null,
+            invoicePdf: null,
+            source: "local",
+            studentName: studentName || null,
+            courseTitle: p.courseTitle || null,
+            paymentNumber: null,
+            totalPayments: null,
+            lines: [{
+              id: `local_line_${p.id}`,
+              description,
+              amount: Math.round(parseFloat(p.amount) * 100),
+              currency: p.currency || "usd",
+            }],
+          });
+        }
+
+        // Sort by created date descending
+        results.sort((a, b) => b.created - a.created);
+        return results;
       }),
 
     createCheckout: protectedProcedure
@@ -2652,72 +3390,6 @@ export const appRouter = router({
           userName: ctx.user.name,
           origin: `${ctx.req.protocol}://${ctx.req.get("host")}`,
           subscriptionId: input.subscriptionId,
-        });
-
-        return { checkoutUrl: session.url };
-      }),
-
-    processSecondInstallment: parentProcedure
-      .input(z.object({
-        subscriptionId: z.number(),
-      }))
-      .mutation(async ({ ctx, input }) => {
-        const { default: Stripe } = await import('stripe');
-        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2025-12-15.clover' });
-
-        // Get subscription details
-        const subscriptionData = await db.getSubscriptionsByParentId(ctx.user.id);
-        const subscriptionRecord = subscriptionData.find(s => s.subscription.id === input.subscriptionId);
-        
-        if (!subscriptionRecord) {
-          throw new TRPCError({ code: 'NOT_FOUND', message: 'Subscription not found' });
-        }
-
-        const subscription = subscriptionRecord.subscription;
-        const course = subscriptionRecord.course;
-        const tutor = subscriptionRecord.tutor;
-
-        // Verify it's an installment plan
-        if (subscription.paymentPlan !== 'installment') {
-          throw new TRPCError({ code: 'BAD_REQUEST', message: 'This subscription is not on an installment plan' });
-        }
-
-        // Verify first installment is paid
-        if (!subscription.firstInstallmentPaid) {
-          throw new TRPCError({ code: 'BAD_REQUEST', message: 'First installment must be paid before processing second installment' });
-        }
-
-        // Verify second installment is not already paid
-        if (subscription.secondInstallmentPaid) {
-          throw new TRPCError({ code: 'BAD_REQUEST', message: 'Second installment has already been paid' });
-        }
-
-        // Create Stripe checkout session for second installment
-        const session = await stripe.checkout.sessions.create({
-          payment_method_types: ['card'],
-          line_items: [
-            {
-              price_data: {
-                currency: 'usd',
-                product_data: {
-                  name: `${course.title} - Second Installment (2 of 2)`,
-                  description: `Student: ${subscription.studentFirstName} ${subscription.studentLastName} | Tutor: ${tutor?.name || 'TBD'}`,
-                },
-                unit_amount: Math.round(parseFloat(subscription.secondInstallmentAmount || '0') * 100),
-              },
-              quantity: 1,
-            },
-          ],
-          mode: 'payment',
-          success_url: `${ctx.req.protocol}://${ctx.req.get('host')}/dashboard?payment=success`,
-          cancel_url: `${ctx.req.protocol}://${ctx.req.get('host')}/dashboard?payment=cancelled`,
-          metadata: {
-            subscriptionId: subscription.id.toString(),
-            courseId: subscription.courseId.toString(),
-            parentId: ctx.user.id.toString(),
-            installmentNumber: '2',
-            paymentType: 'installment',
-          },
         });
 
         return { checkoutUrl: session.url };
@@ -3152,6 +3824,23 @@ export const appRouter = router({
         };
       }),
 
+    deleteUser: adminProcedure
+      .input(z.object({ userId: z.number() }))
+      .mutation(async ({ input, ctx }) => {
+        if (input.userId === ctx.user.id) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot delete your own account." });
+        }
+        const target = await db.getUserById(input.userId);
+        if (!target) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "User not found." });
+        }
+        if (target.role === "admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Admin accounts cannot be deleted." });
+        }
+        await db.deleteUser(input.userId);
+        return { success: true };
+      }),
+
     getAllEnrollments: adminProcedure
       .input(z.object({
         limit: z.number().optional().default(50),
@@ -3244,6 +3933,7 @@ export const appRouter = router({
           status: subscription.paymentStatus as "pending" | "completed" | "failed" | "refunded",
           paymentType: "subscription" as const,
           stripePaymentIntentId: null,
+          stripeInvoiceId: null,
           createdAt: subscription.createdAt,
           updatedAt: subscription.updatedAt,
         }));
@@ -3456,6 +4146,7 @@ export const appRouter = router({
           status: subscription.paymentStatus as "pending" | "completed" | "failed" | "refunded",
           paymentType: "subscription" as const,
           stripePaymentIntentId: null,
+          stripeInvoiceId: null,
           createdAt: subscription.createdAt,
           updatedAt: subscription.updatedAt,
         }));
@@ -4029,7 +4720,6 @@ export const appRouter = router({
       .input(z.object({ tutorId: z.number() }))
       .query(async ({ input }) => {
         const availability = await db.getTutorAvailability(input.tutorId);
-        console.log('[DEBUG tutorAvailability.getByTutorId] tutorId:', input.tutorId, 'slots:', availability.length);
         return availability;
       }),
 
@@ -4303,43 +4993,50 @@ export const appRouter = router({
 
         // Send email notification to parent
         try {
-          const session = await db.getSessionById(input.sessionId);
-          if (session) {
-            const parent = await db.getUserById(input.parentId);
-            const tutor = await db.getUserById(ctx.user.id);
+          const parent = await db.getUserById(input.parentId);
+          const tutor = await db.getUserById(ctx.user.id);
 
-            if (parent && tutor && parent.name && tutor.name) {
-              // Get attachments for this note
-              const attachments = await db.getSessionNoteAttachments(note.id);
+          if (parent?.email && tutor) {
+            const parentProfile = await db.getParentProfileByUserId(parent.id);
+            const sessionDate = new Date(session.scheduledAt);
 
-              const sessionDate = new Date(session.scheduledAt);
-              const emailHtml = await sendSessionNotesEmail({
-                parentName: parent.name,
-                tutorName: tutor.name,
-                sessionDate: sessionDate.toLocaleDateString('en-US', { 
-                  year: 'numeric', 
-                  month: 'long', 
-                  day: 'numeric' 
-                }),
-                sessionTime: sessionDate.toLocaleTimeString('en-US', { 
-                  hour: 'numeric', 
-                  minute: '2-digit',
-                  hour12: true 
-                }),
-                progressSummary: input.progressSummary,
-                homework: input.homework || undefined,
-                challenges: input.challenges || undefined,
-                nextSteps: input.nextSteps || undefined,
-                notesUrl: `https://your-domain.com/session-notes`,
-                attachments: attachments.map(att => ({
-                  fileName: att.fileName,
-                  fileUrl: att.fileUrl,
-                  fileSize: att.fileSize,
-                })),
-              });
-
-              console.log('[Email Service] Session notes email generated:', emailHtml.substring(0, 200));
+            // Get student name and course name from subscription
+            let studentName = "your child";
+            let courseName = "the course";
+            if (session.subscriptionId) {
+              const subscription = await db.getSubscriptionById(session.subscriptionId);
+              if (subscription) {
+                const firstName = (subscription as any).studentFirstName || "";
+                const lastName = (subscription as any).studentLastName || "";
+                if (firstName || lastName) studentName = `${firstName} ${lastName}`.trim();
+              }
             }
+            if (session.courseId) {
+              const course = await db.getCourseById(session.courseId);
+              if (course?.title) courseName = course.title;
+            }
+
+            const emailHtml = await sendSessionNotesEmail({
+              parentName: parent.name || parent.email,
+              studentName,
+              tutorName: tutor.name || `${(tutor as any).firstName || ""} ${(tutor as any).lastName || ""}`.trim() || "Your tutor",
+              courseName,
+              sessionDate: formatEmailDate(sessionDate, parentProfile?.timezone || undefined),
+              sessionTime: formatEmailTime(sessionDate, parentProfile?.timezone || undefined),
+              progressSummary: input.progressSummary,
+              homework: input.homework || undefined,
+              challenges: input.challenges || undefined,
+              nextSteps: input.nextSteps || undefined,
+              notesUrl: `${process.env.VITE_FRONTEND_FORGE_API_URL || ""}/session-notes`,
+            });
+
+            await emailService.sendEmail({
+              to: parent.email,
+              subject: `Session Notes for ${studentName} — ${courseName}`,
+              html: emailHtml,
+            });
+
+            await db.markSessionNoteAsNotified(note.id);
           }
         } catch (emailError) {
           console.error("[Session Notes] Failed to send email notification:", emailError);
@@ -4534,6 +5231,118 @@ export const appRouter = router({
 
         return { success: true };
       }),
+
+    /**
+     * Create session notes from AI-processed transcript
+     */
+    createFromTranscript: tutorProcedure
+      .input(z.object({
+        sessionId: z.number(),
+        transcript: z.string(),
+        processedData: z.object({
+          progressSummary: z.string(),
+          challenges: z.string().optional(),
+          nextSteps: z.string().optional(),
+          topicsCovered: z.array(z.string()),
+          homework: z.string().optional(),
+        }),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        // Verify the session belongs to this tutor
+        const session = await db.getSessionById(input.sessionId);
+        if (!session) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Session not found' });
+        }
+        if (session.tutorId !== ctx.user.id) {
+          throw new TRPCError({ code: 'FORBIDDEN', message: 'You can only add notes to your own sessions' });
+        }
+
+        // Check if note already exists for this session
+        const existing = await db.getSessionNoteBySessionId(input.sessionId);
+
+        let note;
+        if (existing) {
+          // Update existing note
+          note = await db.updateSessionNote(existing.id, {
+            progressSummary: input.processedData.progressSummary,
+            challenges: input.processedData.challenges || null,
+            nextSteps: input.processedData.nextSteps || null,
+            homework: input.processedData.homework || null,
+            transcript: input.transcript,
+            topicsCovered: JSON.stringify(input.processedData.topicsCovered),
+          });
+        } else {
+          // Create new session note with AI-generated content
+          note = await db.createSessionNote({
+            sessionId: input.sessionId,
+            tutorId: ctx.user.id,
+            parentId: session.parentId,
+            progressSummary: input.processedData.progressSummary,
+            challenges: input.processedData.challenges || null,
+            nextSteps: input.processedData.nextSteps || null,
+            homework: input.processedData.homework || null,
+            transcript: input.transcript,
+            topicsCovered: JSON.stringify(input.processedData.topicsCovered),
+          });
+        }
+
+        if (!note) {
+          throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to save session note' });
+        }
+
+        // Send email notification to parent
+        try {
+          const parent = await db.getUserById(session.parentId);
+          const tutor = await db.getUserById(ctx.user.id);
+
+          if (parent?.email && tutor) {
+            const sessionDate = new Date(session.scheduledAt);
+            const parentProfile = await db.getParentProfileByUserId(parent.id);
+
+            let studentName = "your child";
+            let courseName = "the course";
+            if (session.subscriptionId) {
+              const subscription = await db.getSubscriptionById(session.subscriptionId);
+              if (subscription) {
+                const firstName = (subscription as any).studentFirstName || "";
+                const lastName = (subscription as any).studentLastName || "";
+                if (firstName || lastName) studentName = `${firstName} ${lastName}`.trim();
+              }
+            }
+            if (session.courseId) {
+              const course = await db.getCourseById(session.courseId);
+              if (course?.title) courseName = course.title;
+            }
+
+            const emailHtml = await sendSessionNotesEmail({
+              parentName: parent.name || parent.email,
+              studentName,
+              tutorName: tutor.name || `${(tutor as any).firstName || ""} ${(tutor as any).lastName || ""}`.trim() || "Your tutor",
+              courseName,
+              sessionDate: formatEmailDate(sessionDate, parentProfile?.timezone || undefined),
+              sessionTime: formatEmailTime(sessionDate, parentProfile?.timezone || undefined),
+              progressSummary: input.processedData.progressSummary,
+              homework: input.processedData.homework || undefined,
+              challenges: input.processedData.challenges || undefined,
+              nextSteps: input.processedData.nextSteps || undefined,
+              notesUrl: `${process.env.VITE_FRONTEND_FORGE_API_URL || ""}/session-notes`,
+            });
+
+            await emailService.sendEmail({
+              to: parent.email,
+              subject: `Session Notes for ${studentName} — ${courseName}`,
+              html: emailHtml,
+            });
+
+            await db.markSessionNoteAsNotified(note.id);
+          }
+        } catch (emailError) {
+          console.error("[Session Notes] Failed to send email notification:", emailError);
+          // Don't fail the mutation if email fails
+        }
+
+        return note;
+      }),
   }),
 
   // Course Management (Admin)
@@ -4561,6 +5370,8 @@ export const appRouter = router({
         totalSessions: z.number().optional(),
         imageUrl: z.string().optional(),
         curriculum: z.string().optional(),
+        aiPowered: z.boolean().optional(),
+        region: z.enum(["global", "us", "india"]).optional(),
       }))
       .mutation(async ({ input }) => {
         const course = await db.createCourse(input as any);
@@ -4581,10 +5392,12 @@ export const appRouter = router({
         imageUrl: z.string().optional(),
         curriculum: z.string().optional(),
         isActive: z.boolean().optional(),
+        aiPowered: z.boolean().optional(),
+        region: z.enum(["global", "us", "india"]).optional(),
       }))
       .mutation(async ({ input }) => {
         const { id, ...data } = input;
-        await db.updateCourse(id, data as any);
+        await db.updateCourse(id, data);
         return { success: true };
       }),
 
@@ -4664,17 +5477,12 @@ export const appRouter = router({
         bio: z.string().optional(),
       }))
       .mutation(async ({ input, ctx }) => {
-        console.log("[Coordinator Create] Starting creation with input:", input);
-
         // Check if email already exists
         const existingUser = await db.getUserByEmail(input.email);
         if (existingUser) {
-          console.log("[Coordinator Create] Email already in use:", input.email);
           throw new TRPCError({ code: 'BAD_REQUEST', message: 'Email already in use' });
         }
 
-        // Create user with coordinator role
-        console.log("[Coordinator Create] Creating user account...");
         const user = await db.createAuthUser({
           email: input.email,
           firstName: input.firstName,
@@ -4689,36 +5497,22 @@ export const appRouter = router({
           throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to create coordinator' });
         }
 
-        console.log("[Coordinator Create] User created with ID:", user.id);
-
-        // Create coordinator profile
-        console.log("[Coordinator Create] Creating coordinator profile...");
-        const profileData = {
+        const profileId = await db.createCoordinatorProfile({
           userId: user.id,
           specialization: input.specialization,
           phoneNumber: input.phoneNumber,
           bio: input.bio,
           isActive: true,
-        };
-        console.log("[Coordinator Create] Profile data:", profileData);
-
-        const profileId = await db.createCoordinatorProfile(profileData);
+        });
 
         if (!profileId) {
           console.error("[Coordinator Create] Failed to create coordinator profile for user:", user.id);
           throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to create coordinator profile' });
         }
 
-        console.log("[Coordinator Create] Profile created with ID:", profileId);
-
-        // Create password setup token and send email
-        console.log("[Coordinator Create] Creating password setup token...");
         try {
           const setupToken = await db.createPasswordSetupToken(user.id);
-          console.log("[Coordinator Create] Password setup token created:", setupToken ? "success" : "failed");
-
           if (setupToken) {
-            console.log("[Coordinator Create] Sending password setup email to:", user.email);
             const setupUrl = `${process.env.VITE_FRONTEND_FORGE_API_URL || 'http://localhost:3000'}/setup-password?token=${setupToken}`;
             const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48 hours from now
 
@@ -4729,9 +5523,6 @@ export const appRouter = router({
               setupUrl,
               expiresAt,
             });
-            console.log("[Coordinator Create] Password setup email sent:", emailSent ? "success" : "failed");
-          } else {
-            console.error("[Coordinator Create] No password setup token generated");
           }
         } catch (emailError) {
           console.error('[Coordinator Creation] Failed to send password setup email:', emailError);
@@ -4860,9 +5651,7 @@ export const appRouter = router({
      */
     getMyAssignments: coordinatorProcedure
       .query(async ({ ctx }) => {
-        console.log('[Coordinator] Fetching assignments for coordinator ID:', ctx.user.id);
         const assignments = await db.getCoordinatorAssignmentsByCoordinator(ctx.user.id);
-        console.log('[Coordinator] Found assignments:', assignments.length);
         return assignments;
       }),
 
@@ -5146,6 +5935,476 @@ export const appRouter = router({
   /**
    * Notifications router - in-app notifications for users
    */
+  /**
+   * AI utilities router - AI-powered features
+   */
+  ai: router({
+    /**
+     * Summarize text using AI (tutor only)
+     */
+    summarizeText: tutorProcedure
+      .input(z.object({
+        text: z.string().min(1, "Text cannot be empty"),
+        maxLength: z.number().optional().default(150),
+      }))
+      .mutation(async ({ input }) => {
+        const { ENV } = await import("./_core/env");
+        const { GoogleGenerativeAI } = await import("@google/generative-ai");
+
+        if (!ENV.geminiApiKey) {
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: 'Gemini API key is not configured. Please add GEMINI_API_KEY to your .env file.'
+          });
+        }
+
+        try {
+          const genAI = new GoogleGenerativeAI(ENV.geminiApiKey);
+          // Using gemini-2.5-flash (latest fast model)
+          const model = genAI.getGenerativeModel({
+            model: "gemini-2.5-flash"
+          });
+
+          const prompt = `You are a helpful assistant that summarizes tutor session notes. Create concise, professional summaries that capture the key points while maintaining clarity. Focus on student progress, challenges, and next steps.
+
+Please summarize the following tutor session notes in approximately ${input.maxLength} words or less. Keep it professional and focused on the most important points:
+
+${input.text}`;
+
+          const result = await model.generateContent(prompt);
+          const response = result.response;
+          const summary = response.text();
+
+          if (!summary) {
+            throw new TRPCError({
+              code: 'INTERNAL_SERVER_ERROR',
+              message: 'Failed to generate summary'
+            });
+          }
+
+          return { summary };
+        } catch (error: any) {
+          console.error('[AI Summarize] Error:', error);
+
+          // Handle invalid API key
+          if (error?.message?.includes('API_KEY_INVALID') || error?.message?.includes('API key')) {
+            throw new TRPCError({
+              code: 'INTERNAL_SERVER_ERROR',
+              message: 'Invalid Gemini API key. Please check your GEMINI_API_KEY in .env file.'
+            });
+          }
+
+          // Handle quota/rate limit errors
+          if (error?.message?.includes('quota') || error?.message?.includes('RATE_LIMIT')) {
+            throw new TRPCError({
+              code: 'INTERNAL_SERVER_ERROR',
+              message: 'Gemini API quota exceeded. Please check your usage at aistudio.google.com'
+            });
+          }
+
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: error instanceof Error ? error.message : 'Failed to summarize text'
+          });
+        }
+      }),
+
+    /**
+     * Process Zoom transcript and generate structured session notes
+     */
+    processTranscript: tutorProcedure
+      .input(z.object({
+        transcript: z.string().min(50, "Transcript too short (minimum 50 characters)"),
+        sessionId: z.number(),
+        studentName: z.string().optional(),
+        courseName: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const { ENV } = await import("./_core/env");
+        const { GoogleGenerativeAI } = await import("@google/generative-ai");
+
+        if (!ENV.geminiApiKey) {
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: 'Gemini API key is not configured.'
+          });
+        }
+
+        try {
+          const genAI = new GoogleGenerativeAI(ENV.geminiApiKey);
+          const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+          // Create structured prompt for transcript analysis
+          const prompt = `You are an expert educational assistant analyzing a tutoring session transcript.
+
+STUDENT: ${input.studentName || 'Student'}
+COURSE: ${input.courseName || 'General'}
+
+TRANSCRIPT:
+${input.transcript}
+
+CRITICAL: You must respond with ONLY valid JSON. Do not include any explanatory text before or after the JSON.
+
+Analyze this transcript and provide a structured response in EXACTLY this JSON format:
+
+{
+  "progressSummary": "Brief summary of what the student learned and accomplished during this session (2-3 sentences)",
+  "challenges": "Areas where the student struggled or needed help (bullet points or brief paragraph)",
+  "nextSteps": "Specific recommendations for the next session and areas to focus on",
+  "topicsCovered": ["Topic 1", "Topic 2", "Topic 3"],
+  "homework": {
+    "assignments": [
+      {
+        "title": "Assignment title",
+        "description": "What the student should do",
+        "estimatedTime": "15-20 minutes"
+      }
+    ],
+    "summary": "Brief overview of all homework (1-2 sentences)"
+  }
+}
+
+Focus on:
+- Being specific and actionable
+- Highlighting key learning moments
+- Identifying 3-5 main topics covered
+- Creating homework that reinforces session concepts
+- Keeping tone professional but encouraging
+
+Return ONLY the JSON object, nothing else.`;
+
+          const result = await model.generateContent(prompt);
+          const response = result.response;
+          const text = response.text();
+
+          // Log token usage for monitoring
+          const usageMetadata = response.usageMetadata;
+          if (usageMetadata) {
+            console.log('[AI Token Usage]', {
+              promptTokens: usageMetadata.promptTokenCount,
+              responseTokens: usageMetadata.candidatesTokenCount,
+              totalTokens: usageMetadata.totalTokenCount,
+              transcriptSize: input.transcript.length,
+            });
+          }
+
+          // Parse JSON response (handle markdown code blocks)
+          let jsonText = text.trim();
+
+          // Remove markdown code blocks
+          if (jsonText.startsWith('```json')) {
+            jsonText = jsonText.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+          } else if (jsonText.startsWith('```')) {
+            jsonText = jsonText.replace(/```\n?/g, '');
+          }
+
+          // Remove any leading/trailing non-JSON text
+          const jsonStart = jsonText.indexOf('{');
+          const jsonEnd = jsonText.lastIndexOf('}');
+          if (jsonStart !== -1 && jsonEnd !== -1) {
+            jsonText = jsonText.substring(jsonStart, jsonEnd + 1);
+          }
+
+          let parsed;
+          try {
+            parsed = JSON.parse(jsonText);
+          } catch (parseError) {
+            // Log the problematic response for debugging
+            console.error('[AI Process Transcript] Failed to parse JSON:', jsonText.substring(0, 500));
+            throw new TRPCError({
+              code: 'INTERNAL_SERVER_ERROR',
+              message: 'AI returned invalid format. Please try again or use a shorter transcript.'
+            });
+          }
+
+          // Validate required fields
+          if (!parsed.progressSummary) {
+            throw new TRPCError({
+              code: 'INTERNAL_SERVER_ERROR',
+              message: 'AI response missing required fields. Please try again.'
+            });
+          }
+
+          // Normalize challenges to string (handle array or string)
+          let challengesText = '';
+          if (parsed.challenges) {
+            if (Array.isArray(parsed.challenges)) {
+              challengesText = parsed.challenges.map((c: any, idx: number) => `${idx + 1}. ${c}`).join('\n');
+            } else {
+              challengesText = String(parsed.challenges);
+            }
+          }
+
+          // Normalize nextSteps to string (handle array or string)
+          let nextStepsText = '';
+          if (parsed.nextSteps) {
+            if (Array.isArray(parsed.nextSteps)) {
+              nextStepsText = parsed.nextSteps.map((s: any, idx: number) => `${idx + 1}. ${s}`).join('\n');
+            } else {
+              nextStepsText = String(parsed.nextSteps);
+            }
+          }
+
+          // Format homework for storage
+          const homeworkText = parsed.homework?.assignments
+            ? parsed.homework.assignments
+                .map((hw: any, idx: number) =>
+                  `${idx + 1}. ${hw.title}\n   ${hw.description}\n   Estimated time: ${hw.estimatedTime}`
+                )
+                .join('\n\n')
+            : '';
+
+          return {
+            progressSummary: String(parsed.progressSummary || ''),
+            challenges: challengesText,
+            nextSteps: nextStepsText,
+            topicsCovered: parsed.topicsCovered || [],
+            homework: homeworkText,
+            rawResponse: parsed, // Include full response for debugging
+          };
+        } catch (error: any) {
+          console.error('[AI Process Transcript] Error:', error);
+
+          // Handle parsing errors
+          if (error instanceof SyntaxError) {
+            throw new TRPCError({
+              code: 'INTERNAL_SERVER_ERROR',
+              message: 'Failed to parse AI response. Please try again.'
+            });
+          }
+
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: error instanceof Error ? error.message : 'Failed to process transcript'
+          });
+        }
+      }),
+
+    generateQuiz: tutorProcedure
+      .input(z.object({
+        transcript: z.string().min(50, "Transcript too short"),
+        sessionId: z.number(),
+        courseName: z.string().optional(),
+        studentName: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const { ENV } = await import("./_core/env");
+        const { GoogleGenerativeAI } = await import("@google/generative-ai");
+
+        if (!ENV.geminiApiKey) {
+          throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Gemini API key not configured.' });
+        }
+
+        const genAI = new GoogleGenerativeAI(ENV.geminiApiKey);
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+        const prompt = `You are an expert educational assistant. Based on the following tutoring session transcript, generate 5 to 8 multiple-choice questions to test the student's understanding.
+
+STUDENT: ${input.studentName || 'Student'}
+COURSE: ${input.courseName || 'General'}
+
+TRANSCRIPT:
+${input.transcript}
+
+CRITICAL: Respond with ONLY valid JSON. No markdown, no explanations.
+
+Generate questions in EXACTLY this JSON format:
+{
+  "questions": [
+    {
+      "id": "1",
+      "question": "Question text?",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correctAnswer": 0
+    }
+  ]
+}
+
+Rules:
+- Exactly 4 options per question
+- correctAnswer is the 0-based index of the correct option
+- Only ask about topics actually covered in the transcript
+- Keep questions clear and age-appropriate
+
+Return ONLY the JSON object.`;
+
+        try {
+          const result = await model.generateContent(prompt);
+          let jsonText = result.response.text().trim();
+
+          if (jsonText.startsWith('```json')) {
+            jsonText = jsonText.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+          } else if (jsonText.startsWith('```')) {
+            jsonText = jsonText.replace(/```\n?/g, '');
+          }
+          const start = jsonText.indexOf('{');
+          const end = jsonText.lastIndexOf('}');
+          if (start !== -1 && end !== -1) jsonText = jsonText.substring(start, end + 1);
+
+          let parsed: { questions: Array<{ id: string; question: string; options: string[]; correctAnswer: number }> };
+          try {
+            parsed = JSON.parse(jsonText);
+          } catch {
+            throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'AI returned invalid format. Please try again.' });
+          }
+
+          if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) {
+            throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'No questions generated. Try again.' });
+          }
+
+          return { questions: parsed.questions };
+        } catch (error: any) {
+          if (error instanceof TRPCError) throw error;
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: error instanceof Error ? error.message : 'Failed to generate quiz',
+          });
+        }
+      }),
+
+    /**
+     * Grade a session transcript using the EdKonnect 4-criteria rubric (1–4 scale).
+     * Returns scores + evidence per criterion, overall score, and transcript quality signal.
+     */
+    gradeSession: tutorProcedure
+      .input(z.object({
+        transcript: z.string(),
+        sessionId: z.number(),
+        studentName: z.string().optional(),
+        courseName: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        // Guard: transcript must be long enough to grade meaningfully
+        const wordCount = input.transcript.trim().split(/\s+/).length;
+        if (wordCount < 300) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'Transcript too short to grade accurately (fewer than 300 words). Check Zoom recording quality.',
+          });
+        }
+
+        const { GoogleGenerativeAI } = await import('@google/generative-ai');
+        const genAI = new GoogleGenerativeAI(ENV.geminiApiKey);
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+
+        const prompt = `You are an expert educational quality auditor for EdKonnect, an elite tutoring platform. Grade this tutoring session transcript on 4 criteria using a 1–4 rubric.
+
+STUDENT: ${input.studentName || 'Student'}
+COURSE: ${input.courseName || 'General'}
+
+TRANSCRIPT:
+${input.transcript}
+
+RUBRIC CRITERIA:
+
+1. Academic Efficiency & Time Management
+   4 (Exceeds) = Masterful Flow: student is working within 2 mins, 55+ mins of pure subject content, invisible transitions, no tech delays
+   3 (Proficient) = Solid Pacing: brief 3-5 min intro/setup then consistent focus, ~85% time-on-task, minor friction handled quickly
+   2 (Developing) = Fragmented: 10-15 mins lost to non-academic talk, long stories, or repetitive tech setup instructions
+   1 (Support) = Inefficient: less than 70% of time on subject, session feels unorganized, tutor seems unprepared
+
+2. Instructional Quality (Socratic Audit)
+   4 (Exceeds) = Student-Led: student narrates logic and explains every step, tutor asks "Why?" instead of correcting, high rigor
+   3 (Proficient) = Balanced: good mix of "Tell" and "Do", tutor explains then student practices, corrective feedback is clear
+   2 (Developing) = Tutor-Led: too much lecturing, tutor solves most problems while student watches, limited student output
+   1 (Support) = Passive: student disengaged or copying, no check-for-understanding, tutor provides answers without explanation
+
+3. Strategy & Insider Insight
+   4 (Exceeds) = Strategic Edge: teaches specific test traps, shortcuts, or optimization (e.g. Vieta's Formulas, Desmos Regression, Memory Management logic)
+   3 (Proficient) = Curriculum Plus: teaches core concept plus 1-2 helpful tips or shortcuts
+   2 (Developing) = Basic Concepts: strictly follows textbook with no added value, rote memorization with no application strategy
+   1 (Support) = Weak Content: tutor struggles with material, provides incorrect formulas, confusion on syntax, no big picture explanation
+
+4. Synthesis & Branding
+   4 (Exceeds) = Full Closure: student summarizes "3 Golden Rules", homework is highly specific, professional background, correct Zoom name, clear tailored exit plan
+   3 (Proficient) = Standard Closure: quick summary of what was covered, generic homework assigned, professional presence
+   2 (Developing) = Rushed Exit: session ends abruptly, no summary, no clear homework, messy technical setup or distracting background
+   1 (Support) = No Closure: tutor logs off without checking if student has questions, no homework assigned, unprofessional environment
+
+Also assess transcript quality based on speaker attribution coverage, gap frequency, and dialogue completeness.
+
+CRITICAL: Return ONLY valid JSON. No markdown, no explanations. Exactly this format:
+{
+  "grades": [
+    { "criterion": "Academic Efficiency & Time Management", "score": 3, "evidence": "Specific quote or observation from the transcript" },
+    { "criterion": "Instructional Quality", "score": 2, "evidence": "Specific quote or observation from the transcript" },
+    { "criterion": "Strategy & Insider Insight", "score": 4, "evidence": "Specific quote or observation from the transcript" },
+    { "criterion": "Synthesis & Branding", "score": 3, "evidence": "Specific quote or observation from the transcript" }
+  ],
+  "overallScore": 3.0,
+  "overallNarrative": "2-3 sentence professional summary of this session's teaching quality.",
+  "transcriptQuality": "high",
+  "transcriptQualityReason": "Clear speaker attribution throughout with minimal gaps."
+}`;
+
+        try {
+          const result = await model.generateContent(prompt);
+          const rawResponse = result.response.text();
+
+          let parsed: any;
+          try {
+            const jsonMatch = rawResponse.match(/\{[\s\S]*\}/);
+            parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawResponse);
+          } catch {
+            throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'AI returned invalid JSON for grading.' });
+          }
+
+          if (!parsed.grades || !Array.isArray(parsed.grades) || parsed.grades.length !== 4) {
+            throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'AI grading response was malformed.' });
+          }
+
+          const criteriaMap: Record<string, keyof Pick<any, 'academicEfficiency' | 'instructionalQuality' | 'strategyInsight' | 'synthesisBranding'>> = {
+            'Academic Efficiency & Time Management': 'academicEfficiency',
+            'Instructional Quality': 'instructionalQuality',
+            'Strategy & Insider Insight': 'strategyInsight',
+            'Synthesis & Branding': 'synthesisBranding',
+          };
+
+          const scores: Record<string, number> = {};
+          for (const g of parsed.grades) {
+            const key = criteriaMap[g.criterion];
+            if (key) scores[key] = Math.min(4, Math.max(1, Math.round(g.score)));
+          }
+
+          const overallScore = parseFloat(parsed.overallScore) || (
+            (scores.academicEfficiency + scores.instructionalQuality + scores.strategyInsight + scores.synthesisBranding) / 4
+          );
+
+          // Find the recording id for this session if available
+          const sessionRow = await db.getSessionById(input.sessionId);
+          const recordingId = (sessionRow as any)?.zoomMeetingId ?? null;
+
+          await db.saveSessionRubricGrades({
+            sessionId: input.sessionId,
+            recordingId,
+            academicEfficiency: scores.academicEfficiency,
+            instructionalQuality: scores.instructionalQuality,
+            strategyInsight: scores.strategyInsight,
+            synthesisBranding: scores.synthesisBranding,
+            evidence: parsed.grades,
+            overallScore,
+            overallNarrative: parsed.overallNarrative || '',
+            transcriptQuality: parsed.transcriptQuality || 'medium',
+            transcriptQualityReason: parsed.transcriptQualityReason || '',
+          });
+
+          return {
+            grades: parsed.grades,
+            overallScore,
+            overallNarrative: parsed.overallNarrative || '',
+            transcriptQuality: parsed.transcriptQuality || 'medium',
+            transcriptQualityReason: parsed.transcriptQualityReason || '',
+          };
+        } catch (error: any) {
+          if (error instanceof TRPCError) throw error;
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message: error instanceof Error ? error.message : 'Failed to grade session',
+          });
+        }
+      }),
+  }),
+
   notifications: router({
     /**
      * Get notifications for current user
@@ -5367,6 +6626,388 @@ export const appRouter = router({
 
         return recordings;
       }),
+  }),
+
+  quiz: router({
+    /**
+     * Save an approved quiz (tutor action)
+     */
+    create: tutorProcedure
+      .input(z.object({
+        sessionId: z.number(),
+        courseId: z.number().optional(),
+        parentId: z.number(),
+        questions: z.array(z.object({
+          id: z.string(),
+          question: z.string().min(1),
+          options: z.array(z.string().min(1)).length(4),
+          correctAnswer: z.number().min(0).max(3),
+        })).min(1),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const quizId = await db.upsertSessionQuiz({
+          sessionId: input.sessionId,
+          courseId: input.courseId,
+          tutorId: ctx.user.id,
+          parentId: input.parentId,
+          questions: JSON.stringify(input.questions),
+          status: "draft",
+        });
+
+        if (!quizId) {
+          throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to save quiz' });
+        }
+
+        await db.approveAndAssignQuiz(quizId, JSON.stringify(input.questions));
+
+        await db.createInAppNotification({
+          userId: input.parentId,
+          title: "New Quiz Available",
+          message: "Your tutor has assigned a quiz for your recent session. Go to History to take it!",
+          type: "quiz_assigned",
+          relatedId: quizId,
+        });
+
+        return { success: true, quizId };
+      }),
+
+    /**
+     * Get quiz for a specific session
+     */
+    getBySession: protectedProcedure
+      .input(z.object({ sessionId: z.number() }))
+      .query(async ({ input }) => {
+        const quiz = await db.getQuizBySessionId(input.sessionId);
+        if (!quiz) return null;
+        return {
+          ...quiz,
+          questions: JSON.parse(quiz.questions) as Array<{
+            id: string; question: string; options: string[]; correctAnswer: number;
+          }>,
+        };
+      }),
+
+    /**
+     * Get all quizzes assigned to the current parent
+     */
+    getByParent: parentProcedure
+      .query(async ({ ctx }) => {
+        const quizzes = await db.getQuizzesByParentId(ctx.user.id);
+        return quizzes
+          .filter(q => q.status === "approved" || q.status === "completed")
+          .map(q => ({
+            ...q,
+            questions: JSON.parse(q.questions) as Array<{
+              id: string; question: string; options: string[]; correctAnswer: number;
+            }>,
+          }));
+      }),
+
+    /**
+     * Submit quiz answers and mark as completed
+     */
+    complete: parentProcedure
+      .input(z.object({
+        quizId: z.number(),
+        answers: z.array(z.number()),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const quiz = await db.getQuizById(input.quizId);
+
+        if (!quiz) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Quiz not found' });
+        }
+        if (quiz.parentId !== ctx.user.id) {
+          throw new TRPCError({ code: 'FORBIDDEN', message: 'Not authorized to complete this quiz' });
+        }
+        if (quiz.status === "completed") {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'Quiz already completed' });
+        }
+
+        const questions = JSON.parse(quiz.questions) as Array<{
+          id: string; question: string; options: string[]; correctAnswer: number;
+        }>;
+
+        let correct = 0;
+        questions.forEach((q, idx) => {
+          if (input.answers[idx] === q.correctAnswer) correct++;
+        });
+        const score = Math.round((correct / questions.length) * 100);
+
+        await db.completeQuiz(input.quizId, score, correct, questions.length, JSON.stringify(input.answers));
+
+        return { success: true, score, correct, total: questions.length };
+      }),
+
+    /**
+     * Enable/disable quiz generation for a course (tutor who teaches that course)
+     */
+    toggleCourseQuiz: tutorProcedure
+      .input(z.object({
+        courseId: z.number(),
+        enabled: z.boolean(),
+      }))
+      .mutation(async ({ input }) => {
+        const success = await db.updateCourseQuizEnabled(input.courseId, input.enabled);
+        if (!success) {
+          throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to update course' });
+        }
+        return { success: true };
+      }),
+  }),
+
+  /**
+   * Session rubric grades — parent-facing queries
+   */
+  grades: router({
+    /**
+     * Get all rubric grades for sessions belonging to this parent
+     */
+    getByParent: parentProcedure
+      .query(async ({ ctx }) => {
+        const rows = await db.getRubricGradesByParentId(ctx.user.id);
+        return rows.map(r => ({
+          ...r,
+          rubricEvidence: r.rubricEvidence ? JSON.parse(r.rubricEvidence) : [],
+          rubricOverallScore: r.rubricOverallScore ? parseFloat(r.rubricOverallScore as string) : null,
+        }));
+      }),
+
+    /**
+     * Get rubric grade for a single session
+     */
+    getBySession: protectedProcedure
+      .input(z.object({ sessionId: z.number() }))
+      .query(async ({ input }) => {
+        const row = await db.getSessionRubricGrades(input.sessionId);
+        if (!row) return null;
+        return {
+          ...row,
+          rubricEvidence: row.rubricEvidence ? JSON.parse(row.rubricEvidence) : [],
+          rubricOverallScore: row.rubricOverallScore ? parseFloat(row.rubricOverallScore as string) : null,
+        };
+      }),
+  }),
+
+  // Chatbot FAQ
+  chatbot: router({
+    ask: publicProcedure
+      .input(
+        z.object({
+          // Trim whitespace, enforce length bounds, reject blank-after-trim
+          question: z
+            .string()
+            .min(1, "Question cannot be empty")
+            .max(500, "Question is too long (max 500 characters)")
+            .transform((s) => s.trim())
+            .refine((s) => s.length > 0, "Question cannot be blank")
+            // Strip null bytes and control characters (except common whitespace)
+            .transform((s) => s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")),
+          // Only accept relative paths or short absolute URLs — reject arbitrary data
+          pageUrl: z
+            .string()
+            .max(200)
+            .optional()
+            .transform((s) => s?.slice(0, 200)),
+        })
+      )
+      .mutation(async ({ input, ctx }) => {
+        // Rate limiting — 20 requests per IP per 60 seconds
+        const ip =
+          (ctx.req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0].trim() ??
+          ctx.req.socket?.remoteAddress ??
+          "unknown";
+
+        if (!checkChatbotRateLimit(ip)) {
+          throw new TRPCError({
+            code: "TOO_MANY_REQUESTS",
+            message: "Too many requests. Please wait a moment before asking again.",
+          });
+        }
+
+        const result = searchFaq(input.question);
+        const { answer, matched, category, intent, suggestions } = result;
+
+        // Log every query with structured data (matched FAQ id, score, intent)
+        logQuery(input.question, result, input.pageUrl);
+
+        // Also log to unanswered file when no match — for quick review
+        if (!matched) {
+          logUnansweredQuestion(input.question, input.pageUrl);
+        }
+
+        return { answer, matched, category, intent, suggestions: suggestions ?? [] };
+      }),
+  }),
+
+  // ============ Referral Router ============
+  referral: router({
+
+    /** Get the current user's referral code and link */
+    getMyCode: protectedProcedure.query(async ({ ctx }) => {
+      const user = await db.getUserById(ctx.user.id);
+      if (!user) throw new TRPCError({ code: "NOT_FOUND", message: "User not found" });
+      const BASE_URL = process.env.VITE_FRONTEND_FORGE_API_URL || "http://localhost:3000";
+      const referralLink = user.referralCode
+        ? `${BASE_URL}/signup?ref=${user.referralCode}`
+        : null;
+      return { referralCode: user.referralCode ?? null, referralLink };
+    }),
+
+    /** Check if an email is already registered (used before sending invite) */
+    checkEmail: protectedProcedure
+      .input(z.object({ email: z.string().email() }))
+      .query(async ({ ctx, input }) => {
+        // Can't invite yourself
+        if (input.email.toLowerCase() === ctx.user.email.toLowerCase()) {
+          return { available: false, reason: "You cannot invite yourself." };
+        }
+        const existing = await db.getUserByEmail(input.email);
+        if (existing) {
+          return { available: false, reason: "This user is already registered on EdKonnect." };
+        }
+        return { available: true, reason: null };
+      }),
+
+    /** Send a referral invite email to a friend */
+    sendInvite: protectedProcedure
+      .input(z.object({ email: z.string().email() }))
+      .mutation(async ({ ctx, input }) => {
+        const invitedEmail = input.email.toLowerCase().trim();
+
+        // Can't invite yourself
+        if (invitedEmail === ctx.user.email.toLowerCase()) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot invite yourself." });
+        }
+
+        // Check if already registered
+        const existing = await db.getUserByEmail(invitedEmail);
+        if (existing) {
+          throw new TRPCError({ code: "CONFLICT", message: "This user is already registered on EdKonnect." });
+        }
+
+        // Get referrer's code (generate if missing)
+        let referrerUser = await db.getUserById(ctx.user.id);
+        if (!referrerUser) throw new TRPCError({ code: "NOT_FOUND", message: "User not found" });
+
+        if (!referrerUser.referralCode) {
+          const newCode = await db.generateUniqueReferralCode();
+          await db.setUserReferralCode(ctx.user.id, newCode);
+          referrerUser = await db.getUserById(ctx.user.id);
+        }
+
+        const referralCode = referrerUser!.referralCode!;
+
+        // Prevent duplicate invite to same email from same referrer
+        const referrals = await db.getReferralsByReferrer(ctx.user.id);
+        const alreadyInvited = referrals.some((r: any) => r.referral.invitedEmail === invitedEmail);
+        if (alreadyInvited) {
+          throw new TRPCError({ code: "CONFLICT", message: "You have already sent an invite to this email." });
+        }
+
+        // Create referral record
+        const referral = await db.createReferral({ referrerId: ctx.user.id, invitedEmail });
+        if (!referral) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to create referral record." });
+        }
+
+        // Send invite email
+        const BASE_URL = process.env.VITE_FRONTEND_FORGE_API_URL || "http://localhost:3000";
+        const signupUrl = `${BASE_URL}/signup?ref=${referralCode}`;
+        const referrerName = `${referrerUser!.firstName} ${referrerUser!.lastName}`.trim();
+
+        await sendReferralInviteEmail({ invitedEmail, referrerName, signupUrl });
+
+        return { success: true, message: `Invite sent to ${invitedEmail}` };
+      }),
+
+    /** Get referral history for the current user */
+    getMyReferrals: protectedProcedure.query(async ({ ctx }) => {
+      const referrals = await db.getReferralsByReferrer(ctx.user.id);
+      return referrals.map((r: any) => ({
+        id: r.referral.id,
+        invitedEmail: r.referral.invitedEmail,
+        status: r.referral.status,
+        referredUserName: r.referredUser
+          ? `${r.referredUser.firstName} ${r.referredUser.lastName}`.trim()
+          : null,
+        createdAt: r.referral.createdAt,
+      }));
+    }),
+
+    /** Get all coupons belonging to the current user */
+    getMyCoupons: protectedProcedure.query(async ({ ctx }) => {
+      const coupons = await db.getCouponsByUserId(ctx.user.id);
+      // Determine if each coupon was issued because this user was referred (vs being a referrer reward)
+      const referredReferral = await db.getReferralByReferredUserId(ctx.user.id);
+      return coupons.map(c => ({
+        ...c,
+        isReferredCoupon: !!(referredReferral && c.sourceReferralId === referredReferral.id),
+      }));
+    }),
+
+    /** Validate a coupon code (used in enrollment UI) */
+    validateCoupon: protectedProcedure
+      .input(z.object({ code: z.string(), coursePriceUsd: z.number().optional() }))
+      .query(async ({ ctx, input }) => {
+        const coupon = await db.getCouponByCode(input.code);
+        if (!coupon) {
+          return { valid: false, reason: "Invalid coupon code." };
+        }
+        if (coupon.userId !== ctx.user.id) {
+          return { valid: false, reason: "This coupon does not belong to your account." };
+        }
+        if (coupon.isUsed) {
+          return { valid: false, reason: "This coupon has already been used." };
+        }
+        // Resolve tier-based discount if course price is provided
+        let discountAmountUsd = parseFloat(coupon.discountAmountUsd ?? "0");
+        let discountAmountInr = parseFloat(coupon.discountAmountInr ?? "0");
+        if (input.coursePriceUsd != null && input.coursePriceUsd > 0) {
+          const resolved = await db.getReferralDiscountForPrice(input.coursePriceUsd);
+          discountAmountUsd = resolved.usd;
+          discountAmountInr = resolved.inr;
+        }
+        return {
+          valid: true,
+          discountAmountUsd,
+          discountAmountInr,
+          couponId: coupon.id,
+        };
+      }),
+
+    /** Admin: get referral discount tier settings */
+    getReferralSettings: adminProcedure.query(async () => {
+      const tiers = await db.getReferralSettings();
+      return tiers.map(t => ({
+        id: t.id,
+        maxPriceUsd: t.maxPriceUsd != null ? parseFloat(t.maxPriceUsd) : null,
+        discountAmountUsd: parseFloat(t.discountAmountUsd),
+        discountAmountInr: parseFloat(t.discountAmountInr),
+        label: t.label,
+        sortOrder: t.sortOrder,
+      }));
+    }),
+
+    /** Admin: save referral discount tier settings */
+    saveReferralSettings: adminProcedure
+      .input(z.array(z.object({
+        id: z.number().optional(),
+        maxPriceUsd: z.number().nullable(),
+        discountAmountUsd: z.number(),
+        discountAmountInr: z.number(),
+        label: z.string(),
+        sortOrder: z.number(),
+      })))
+      .mutation(async ({ input }) => {
+        await db.upsertReferralSettings(input);
+        return { success: true };
+      }),
+
+    /** Admin: get all referral history */
+    getAllReferrals: adminProcedure.query(async () => {
+      return db.getAllReferrals();
+    }),
   }),
 });
 
